@@ -68,6 +68,7 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
   // 2. Barcode Scanning & Input States
   const [currentMode, setCurrentMode] = useState<"not_done" | "deficient">("not_done");
   const [barcodeInput, setBarcodeInput] = useState("");
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 3. Tracked Student Barcode Sets
@@ -370,15 +371,14 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
   };
 
   const handleResetSession = () => {
-    if (
-      window.confirm(
-        "هل أنت متأكد من رغبتك في تفريغ قوائم الرصد الحالية لهذه المجموعة لبدء رصد جديد؟"
-      )
-    ) {
-      setNotDoneBarcodes([]);
-      setDeficientBarcodes([]);
-      setFeedbackMessage(null);
-    }
+    setShowResetConfirm(true);
+  };
+
+  const handleConfirmResetSession = () => {
+    setNotDoneBarcodes([]);
+    setDeficientBarcodes([]);
+    setFeedbackMessage(null);
+    setShowResetConfirm(false);
   };
 
   const formattedLogText = [
@@ -932,6 +932,45 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Reset Session Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="glass-panel border-amber-500/50 p-6 rounded-3xl max-w-sm w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 text-right">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-fancy text-white">تأكيد تفريغ رصد الواجب</h3>
+                <p className="text-xs text-amber-300">بدء جلسة رصد جديدة</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              هل أنت متأكد من رغبتك في تفريغ قوائم الرصد الحالية لهذه المجموعة لبدء رصد جديد؟
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleConfirmResetSession}
+                className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition cursor-pointer shadow-lg shadow-amber-500/20 flex items-center justify-center gap-1.5"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>نعم، تفريغ الرصد الآن</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

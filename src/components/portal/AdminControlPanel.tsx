@@ -113,6 +113,10 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   const [editPhone, setEditPhone] = useState("");
   const [editFeedback, setEditFeedback] = useState<string | null>(null);
 
+  // Delete Confirmation Modal State (Reliable in-app modal, replaces window.confirm)
+  const [accountToDelete, setAccountToDelete] = useState<{ barcode: string; studentName: string } | null>(null);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
   // Settings State
   const [adminSettings, setAdminSettings] = useState<AdminPortalSettings>(() =>
     getAdminPortalSettings()
@@ -432,19 +436,30 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     setTimeout(() => setLiveActionFeedback(null), 6000);
   };
 
-  // Action: Delete / Reset Account (forces unactivated status again & automatic remote logout)
-  const handleDeleteAccount = async (barcode: string, studentName: string) => {
-    const confirmed = window.confirm(
-      `هل أنت متأكد من حذف أو إلغاء تفعيل حساب ولي أمر الطالب (${studentName})؟\n\nسيعود الحساب إلى حالة (غير مفعل)، وسيتم تسجيل خروج ولي الأمر فوراً وتلقائياً من هاتفه المحمول.`
-    );
-    if (!confirmed) return;
+  // Action: Delete / Reset Account (opens in-app confirmation modal, no window.confirm)
+  const handleDeleteAccount = (barcode: string, studentName: string) => {
+    setAccountToDelete({ barcode, studentName });
+  };
 
-    await deleteParentAccount(barcode);
-    reloadAccounts();
-    setLiveActionFeedback(
-      `🗑️ تم حذف حساب ولي أمر (${studentName}) وإلغاء تفعيله، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
-    );
-    setTimeout(() => setLiveActionFeedback(null), 6000);
+  // Action: Execute deletion after modal confirmation
+  const handleConfirmDeleteAccount = async () => {
+    if (!accountToDelete) return;
+    setIsDeletingAccount(true);
+    const { barcode, studentName } = accountToDelete;
+    try {
+      await deleteParentAccount(barcode);
+      reloadAccounts();
+      setLiveActionFeedback(
+        `🗑️ تم حذف حساب ولي أمر (${studentName}) بنجاح، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
+      );
+      setAccountToDelete(null);
+      setTimeout(() => setLiveActionFeedback(null), 6000);
+    } catch (err) {
+      console.error("Error deleting parent account:", err);
+      setLiveActionFeedback("❌ حدث خطأ أثناء حذف الحساب، يرجى المحاولة ثانية.");
+    } finally {
+      setIsDeletingAccount(false);
+    }
   };
 
   // Action: Quick Direct Activate with Default Credentials
@@ -1622,6 +1637,57 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: DELETE PARENT ACCOUNT CONFIRMATION */}
+      {accountToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-rose-500/50 p-6 shadow-2xl space-y-4 text-right my-auto">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-fancy">
+                  تأكيد حذف وإلغاء تفعيل الحساب
+                </h3>
+                <p className="text-xs text-rose-300/90 font-bold">
+                  {accountToDelete.studentName}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 text-xs space-y-2 leading-relaxed text-slate-300">
+              <div className="flex justify-between text-slate-400">
+                <span>كود الباركود:</span>
+                <span className="font-mono text-amber-300 font-bold">#{accountToDelete.barcode}</span>
+              </div>
+              <p className="text-rose-300 text-[11px] pt-1.5 border-t border-slate-800">
+                ⚠️ سيتم إرجاع الحساب إلى حالة (غير مفعل)، وسيتم <strong>تسجيل خروج هاتف ولي الأمر فوراً وتلقائياً</strong> عن بُعد ولن يتمكن من الدخول إلا بإعادة تفعيله.
+              </p>
+            </div>
+
+            <div className="pt-2 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isDeletingAccount}
+                onClick={handleConfirmDeleteAccount}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-xs transition cursor-pointer shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>{isDeletingAccount ? "جارِ الحذف..." : "نعم، حذف الحساب فوراً"}</span>
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingAccount}
+                onClick={() => setAccountToDelete(null)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
           </div>
         </div>
       )}

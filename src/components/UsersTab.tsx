@@ -48,6 +48,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
   const [originalEditUsername, setOriginalEditUsername] = useState("");
+  const [deleteConfirmUsername, setDeleteConfirmUsername] = useState<string | null>(null);
 
   const handleTogglePerm = (perm: PermissionKey) => {
     if (selectedPerms.includes(perm)) {
@@ -289,11 +290,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
                         {!isOnlyAdmin && !isCurrentActive && (
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`هل أنت متأكد من حذف حساب (${user.username})؟`)) {
-                                onDeleteUser(user.username);
-                              }
-                            }}
+                            onClick={() => setDeleteConfirmUsername(user.username)}
                             className="px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -405,6 +402,48 @@ export const UsersTab: React.FC<UsersTabProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmUsername && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="glass-panel border-rose-500/50 p-6 rounded-3xl max-w-sm w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 text-right">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-fancy text-white">تأكيد حذف المستخدم</h3>
+                <p className="text-xs text-rose-300 font-bold font-mono">@{deleteConfirmUsername}</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              هل أنت متأكد من رغبتك في حذف حساب هذا المستخدم نهائياً من النظام؟ لن يتمكن من تسجيل الدخول مرة أخرى.
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteUser(deleteConfirmUsername);
+                  setDeleteConfirmUsername(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>نعم، احذف الحساب</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmUsername(null)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
           </div>
         </div>
       )}

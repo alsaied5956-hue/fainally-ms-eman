@@ -83,7 +83,7 @@ self.addEventListener("fetch", (event) => {
 self.addEventListener("push", (event) => {
   let data = {
     title: "منظومة الأستاذة إيمان الدمشيتي",
-    body: "تحديث جديد بخصوص الطالب",
+    body: "تحديث جديد بخصوص الطالب في المنظومة",
     icon: "/icon.svg",
     badge: "/icon.svg",
     url: "/"
@@ -102,7 +102,10 @@ self.addEventListener("push", (event) => {
     body: data.body,
     icon: data.icon || "/icon.svg",
     badge: data.badge || "/icon.svg",
-    vibrate: [150, 80, 150],
+    vibrate: [300, 100, 300, 100, 400], // High-energy vibration pattern for phones
+    silent: false, // Rings device's default notification ringtone
+    renotify: true, // Alerts phone sound even if prior notification is still in tray
+    requireInteraction: true,
     data: {
       url: data.url || "/",
       timestamp: Date.now()
@@ -116,7 +119,34 @@ self.addEventListener("push", (event) => {
   );
 });
 
-// Notification Click Handler
+// Client Message Listener: allows app tabs and background sync to trigger OS notifications with phone sound
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SHOW_PORTAL_NOTIFICATION") {
+    const { title, body, icon, badge, url, vibrate, sound, tag, data } = event.data;
+    const options = {
+      body: body || "",
+      icon: icon || "/icon.svg",
+      badge: badge || "/icon.svg",
+      vibrate: vibrate || [300, 100, 300, 100, 400],
+      silent: false, // Ensures mobile sound rings
+      renotify: true,
+      requireInteraction: true,
+      tag: tag || `eman-${Date.now()}`,
+      data: {
+        url: url || "/",
+        ...(data || {})
+      },
+      dir: "rtl",
+      lang: "ar"
+    };
+
+    event.waitUntil(
+      self.registration.showNotification(title || "منظومة الأستاذة إيمان الدمشيتي", options)
+    );
+  }
+});
+
+// Notification Click Handler: focuses existing window or opens the portal
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const targetUrl = event.notification.data?.url || "/";

@@ -82,6 +82,7 @@ import { HomeworkTrackerTab } from "./components/HomeworkTrackerTab";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./utils/liveEventStream";
 import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide-react";
 import { PortalMasterApp } from "./components/portal/PortalMasterApp";
+import { deleteParentAccount } from "./utils/portalStorage";
 
 export default function App() {
   const [appViewMode, setAppViewMode] = useState<"portal" | "teacher">(() => {
@@ -783,6 +784,8 @@ export default function App() {
     }).catch(console.warn);
 
     deleteStudentFromSupabase(barcode).catch(console.warn);
+    // Revoke and delete parent account so parent's phone is automatically logged out
+    deleteParentAccount(barcode).catch(console.warn);
   }, [students]);
 
   // Handler: Clear All Data

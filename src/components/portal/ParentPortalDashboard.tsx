@@ -161,6 +161,156 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     }
   };
 
+  // 1. Live Attendance Status Alert Tracking
+  const prevAttendanceRef = useRef<Record<string, string>>({});
+  const isInitialAttendanceMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialAttendanceMount.current) {
+      isInitialAttendanceMount.current = false;
+      const initialMap: Record<string, string> = {};
+      allChildBarcodes.forEach((b) => {
+        initialMap[b] = attendanceToday[b] || "";
+      });
+      prevAttendanceRef.current = initialMap;
+      return;
+    }
+
+    allChildBarcodes.forEach((barcode) => {
+      const currentStatus = attendanceToday[barcode] || "";
+      const prevStatus = prevAttendanceRef.current[barcode] || "";
+
+      if (currentStatus && currentStatus !== prevStatus) {
+        const studentObj = students.find((s) => s.barcode === barcode);
+        const sName = studentObj?.name || "الطالب";
+        const scanTime = scanLogTimes[barcode] || "";
+
+        if (currentStatus === "حضور") {
+          sendPortalNotification(
+            "🟢 تسجيل حضور في المركز",
+            `تم تسجيل وصول وحضور الطالب (${sName}) في المركز بنجاح! ${scanTime ? `(الوقت: ${scanTime})` : ""}`,
+            "attendance"
+          );
+        } else if (currentStatus === "تأخير") {
+          sendPortalNotification(
+            "⚠️ تنبيه تأخير عن موعد الحصة",
+            `تم تسجيل حضور الطالب (${sName}) متأخراً عن موعد بداية الحصة الرسمي. ${scanTime ? `(الوقت: ${scanTime})` : ""}`,
+            "delay"
+          );
+        } else if (currentStatus === "غياب") {
+          sendPortalNotification(
+            "🔴 تنبيه غياب عن الحصة",
+            `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${sName}) عن موعد حصة اليوم.`,
+            "absence"
+          );
+        }
+      }
+
+      prevAttendanceRef.current[barcode] = currentStatus;
+    });
+  }, [attendanceToday, allChildBarcodes, students, scanLogTimes]);
+
+  // 2. Live Payment Alert Tracking
+  const prevPaymentsMapRef = useRef<Record<string, number>>({});
+  const isInitialPaymentsMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialPaymentsMount.current) {
+      isInitialPaymentsMount.current = false;
+      const initialMap: Record<string, number> = {};
+      allChildBarcodes.forEach((b) => {
+        initialMap[b] = payments[b] ? Object.keys(payments[b]).length : 0;
+      });
+      prevPaymentsMapRef.current = initialMap;
+      return;
+    }
+
+    allChildBarcodes.forEach((barcode) => {
+      const studentPayments = payments[barcode] || {};
+      const currentCount = Object.keys(studentPayments).length;
+      const prevCount = prevPaymentsMapRef.current[barcode] || 0;
+
+      if (currentCount > prevCount) {
+        const studentObj = students.find((s) => s.barcode === barcode);
+        const sName = studentObj?.name || "الطالب";
+        const allMonths = Object.keys(studentPayments);
+        const latestMonth = allMonths[allMonths.length - 1];
+        const latestRec = studentPayments[latestMonth];
+
+        if (latestRec) {
+          sendPortalNotification(
+            "💳 تأكيد سداد المصروفات",
+            `تم استلام سداد اشتراك شهر (${latestRec.month}) للطالب (${sName}) بمبلغ ${latestRec.amount} ج.م بنجاح.`,
+            "fee"
+          );
+        }
+      }
+
+      prevPaymentsMapRef.current[barcode] = currentCount;
+    });
+  }, [payments, allChildBarcodes, students]);
+
+  // 3. Live Exam Grade Alert Tracking
+  const prevExamCountRef = useRef<Record<string, number>>({});
+  const isInitialExamsMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialExamsMount.current) {
+      isInitialExamsMount.current = false;
+      const initialMap: Record<string, number> = {};
+      allChildBarcodes.forEach((b) => {
+        const s = students.find((st) => st.barcode === b);
+        initialMap[b] = s?.totalExamScores?.length || 0;
+      });
+      prevExamCountRef.current = initialMap;
+      return;
+    }
+
+    allChildBarcodes.forEach((barcode) => {
+      const studentObj = students.find((s) => s.barcode === barcode);
+      const scores = studentObj?.totalExamScores || [];
+      const currentCount = scores.length;
+      const prevCount = prevExamCountRef.current[barcode] || 0;
+
+      if (currentCount > prevCount && scores.length > 0) {
+        const latestExam = scores[scores.length - 1];
+        const sName = studentObj?.name || "الطالب";
+
+        sendPortalNotification(
+          "📝 نتيجة اختبار جديدة",
+          `حصل الطالب (${sName}) على درجة ${latestExam.score} من ${latestExam.maxScore} في امتحان: ${latestExam.title}`,
+          "grade"
+        );
+      }
+
+      prevExamCountRef.current[barcode] = currentCount;
+    });
+  }, [students, allChildBarcodes]);
+
+  // 4. Live Chat Alert Tracking (when admin replies)
+  const prevAdminChatCountRef = useRef<number>(-1);
+
+  useEffect(() => {
+    const adminMsgs = chatMessages.filter((m) => m.sender === "admin");
+    if (prevAdminChatCountRef.current === -1) {
+      prevAdminChatCountRef.current = adminMsgs.length;
+      return;
+    }
+
+    if (adminMsgs.length > prevAdminChatCountRef.current) {
+      const latestMsg = adminMsgs[adminMsgs.length - 1];
+      if (latestMsg && activeTab !== "chat") {
+        sendPortalNotification(
+          "💬 رسالة جديدة من إدارة المركز",
+          `الأستاذة إيمان الدمشيتي: "${latestMsg.text.slice(0, 75)}"`,
+          "chat"
+        );
+      }
+    }
+
+    prevAdminChatCountRef.current = adminMsgs.length;
+  }, [chatMessages, activeTab]);
+
   // ----------------------------------------------------
   // CALCULATED METRICS FOR DASHBOARD
   // ----------------------------------------------------
@@ -1401,13 +1551,28 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                     تلقي رنين صوتي وإشعار فوري عند مسح الحضور أو إضافة درجات
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleEnableNotifications}
-                  className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold border border-slate-700 transition cursor-pointer"
-                >
-                  {hasNotifPerm ? "الإشعارات مفعلة ✓" : "تفعيل الإشعارات"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sendPortalNotification(
+                        "🔔 تجربة رنين وإشعار الهاتف",
+                        "رائع! الإشعارات والصوت والاهتزاز تعمل بنجاح وبأعلى كفاءة على هاتفك.",
+                        "grade"
+                      );
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-xs font-bold transition cursor-pointer"
+                  >
+                    تجربة رنين الهاتف 🔊
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEnableNotifications}
+                    className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold border border-slate-700 transition cursor-pointer"
+                  >
+                    {hasNotifPerm ? "الإشعارات مفعلة ✓" : "تفعيل الإشعارات"}
+                  </button>
+                </div>
               </div>
 
               {/* PWA App Install in Profile */}

@@ -73,6 +73,7 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
   const [activeGradeFilter, setActiveGradeFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // New Message Composer State
   const [isComposerOpen, setIsComposerOpen] = useState(false);
@@ -230,11 +231,7 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
             {messages.length > 0 && (
               <button
                 type="button"
-                onClick={() => {
-                  if (window.confirm("⚠️ هل أنت متأكد من مسح جميع رسائل وإشعارات المنصة من السجل؟")) {
-                    clearAllPlatformMessages();
-                  }
-                }}
+                onClick={() => setShowClearConfirm(true)}
                 className="p-2.5 rounded-2xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition-all cursor-pointer"
                 title="مسح سجل الإشعارات بالكامل"
               >
@@ -554,6 +551,48 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
           })
         )}
       </div>
+
+      {/* Clear Messages Confirmation Modal */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+          <div className="glass-panel border-rose-500/50 p-6 rounded-3xl max-w-sm w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 text-right">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-fancy text-white">تفريغ سجل الإشعارات</h3>
+                <p className="text-xs text-rose-300">مسح كافة الرسائل السابقة</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              ⚠️ هل أنت متأكد من مسح جميع رسائل وإشعارات المنصة من السجل؟ هذا الإجراء لا يمكن التراجع عنه.
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  clearAllPlatformMessages();
+                  setShowClearConfirm(false);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition cursor-pointer shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>نعم، مسح السجل بالكامل</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
