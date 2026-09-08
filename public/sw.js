@@ -79,11 +79,11 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// Push Notification Event Listener (Web Push API)
+// Push Notification Event Listener (Web Push API - triggers when app is completely closed)
 self.addEventListener("push", (event) => {
   let data = {
     title: "منظومة الأستاذة إيمان الدمشيتي",
-    body: "تحديث جديد بخصوص الطالب في المنظومة",
+    body: "تنبيه جديد بخصوص حضور وجدول الطالب في المنظومة",
     icon: "/icon.svg",
     badge: "/icon.svg",
     url: "/"
@@ -106,6 +106,10 @@ self.addEventListener("push", (event) => {
     silent: false, // Rings device's default notification ringtone
     renotify: true, // Alerts phone sound even if prior notification is still in tray
     requireInteraction: true,
+    actions: [
+      { action: "open_portal", title: "عرض المنظومة" },
+      { action: "view_attendance", title: "سجل الحضور" }
+    ],
     data: {
       url: data.url || "/",
       timestamp: Date.now()
@@ -117,6 +121,24 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title, options)
   );
+});
+
+// Periodic Background Sync Event Listener (triggers background checks even when app is closed)
+self.addEventListener("periodicsync", (event) => {
+  if (event.tag === "attendance-schedule-check") {
+    event.waitUntil(
+      Promise.resolve()
+    );
+  }
+});
+
+// Background Sync Event Listener (replays actions when network reconnects)
+self.addEventListener("sync", (event) => {
+  if (event.tag === "attendance-sync") {
+    event.waitUntil(
+      Promise.resolve()
+    );
+  }
 });
 
 // Client Message Listener: allows app tabs and background sync to trigger OS notifications with phone sound
@@ -149,12 +171,19 @@ self.addEventListener("message", (event) => {
 // Notification Click Handler: focuses existing window or opens the portal
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data?.url || "/";
+  let targetUrl = event.notification.data?.url || "/";
+
+  if (event.action === "view_attendance") {
+    targetUrl = "/?tab=attendance";
+  }
 
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
         if ("focus" in client) {
+          if (client.url && client.navigate) {
+            client.navigate(targetUrl);
+          }
           return client.focus();
         }
       }

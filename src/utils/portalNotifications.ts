@@ -137,12 +137,22 @@ export function isNotificationSupported(): boolean {
 /**
  * Request permission for web push notifications
  */
-export async function requestNotificationPermission(): Promise<NotificationPermission> {
+export async function requestNotificationPermission(
+  userId?: string,
+  userRole: "parent" | "student" | "admin" = "parent"
+): Promise<NotificationPermission> {
   if (!isNotificationSupported()) {
     return "denied";
   }
   try {
     const perm = await Notification.requestPermission();
+    if (perm === "granted" && userId) {
+      import("../services/pushNotificationService")
+        .then(({ registerPushSubscription }) => {
+          registerPushSubscription(userId, userRole).catch(() => {});
+        })
+        .catch(() => {});
+    }
     return perm;
   } catch {
     return "denied";

@@ -233,3 +233,104 @@ begin
     order by v.date_key desc;
 end;
 $$ language plpgsql security definer;
+
+-- ==============================================================================
+-- DYNAMIC DATE SERIES & OUTER-JOIN ATTENDANCE (PREVENTS MISSING DATES)
+-- Generates an unbroken calendar strictly for student's group (A: Sat/Mon/Wed, B: Sun/Tue/Thu)
+-- Outer-joins with real attendance_logs, marking unrecorded dates as 'لم ترصد'
+-- ==============================================================================
+create or replace function public.get_student_complete_schedule_attendance(
+    p_barcode text,
+    p_start_date date,
+    p_end_date date default current_date
+)
+returns table (
+    student_id uuid,
+    barcode text,
+    student_name text,
+    group_days text,
+    date_key text,
+    day_of_week int,
+    day_name text,
+    status text,
+    is_recorded boolean,
+    time_recorded timestamptz
+) as $$
+declare
+    v_student public.students%rowtype;
+    v_is_group_a boolean;
+begin
+    -- 1. Fetch student master record
+    select * into v_student
+    from public.students
+    where public.students.barcode = trim(p_barcode)
+    limit 1;
+
+    if not found then
+        return;
+    end if;
+
+    -- 2. Determine schedule group
+    v_is_group_a := (v_student.group_days like '%سبت%' or v_student.group_days ilike '%group a%' or v_student.group_days ilike '%sat%');
+
+    -- 3. Return unbroken dynamic date series joined with real attendance logs
+    return query
+    with recursive_calendar as (
+        select 
+            d::date as sched_date,
+            extract(dow from d)::int as dow,
+            case extract(dow from d)::int
+                when 0 then 'الأحد'
+                when 1 then 'الإثنين'
+                when 2 then 'الثلاثاء'
+                when 3 then 'الأربعاء'
+                when 4 then 'الخميس'
+                when 5 then 'الجمعة'
+                when 6 then 'السبت'
+            end as arabic_day_name
+        from generate_series(p_start_date::timestamp, p_end_date::timestamp, '1 day'::interval) d
+        where (v_is_group_a and extract(dow from d)::int in (6, 1, 3))
+           or (not v_is_group_a and extract(dow from d)::int in (0, 2, 4))
+    )
+    select 
+        v_student.id as student_id,
+        v_student.barcode,
+        v_student.name as student_name,
+        v_student.group_days,
+        to_char(rc.sched_date, 'YYYY-MM-DD') as date_key,
+        rc.dow as day_of_week,
+        rc.arabic_day_name as day_name,
+        coalesce(a.status, 'لم ترصد') as status,
+        (a.id is not null) as is_recorded,
+        a.time_recorded
+    from recursive_calendar rc
+    left join public.attendance_logs a 
+        on a.student_id = v_student.id 
+       and a.date_key = to_char(rc.sched_date, 'YYYY-MM-DD')
+    order by rc.sched_date desc;
+end;
+$$ language plpgsql security definer;
+
+-- ==============================================================================
+-- PUSH NOTIFICATION SUBSCRIPTIONS TABLE
+-- Stores Web Push endpoints and keys for background notifications when app is closed
+-- ==============================================================================
+create table if not exists public.push_subscriptions (
+    id uuid primary key default uuid_generate_v4(),
+    user_id text not null,               -- Student barcode, parent phone, or admin username
+    user_role text not null default 'parent',
+    endpoint text not null unique,       -- Push service endpoint URL (FCM/Mozilla/Apple)
+    p256dh text not null,                -- Public elliptic curve key
+    auth text not null,                  -- Authentication secret
+    user_agent text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_push_subscriptions_user on public.push_subscriptions (user_id);
+create index if not exists idx_push_subscriptions_endpoint on public.push_subscriptions (endpoint);
+
+alter table public.push_subscriptions enable row level security;
+create policy "Allow public push subscription upsert" on public.push_subscriptions
+    for all using (true) with check (true);
+

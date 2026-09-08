@@ -23,6 +23,7 @@ import {
   getArabicDayName,
   DEFAULT_GRADE_PRICES,
   isOfficialGroupDay,
+  generateScheduledDateSeries,
 } from "../../utils/helpers";
 import { printElement } from "../../utils/print";
 import { PWAInstallButton } from "./PWAInstallButton";
@@ -176,7 +177,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   // Request push notification permission
   const handleEnableNotifications = async () => {
-    const perm = await requestNotificationPermission();
+    const perm = await requestNotificationPermission(activeStudent.barcode || account.parentPhone, "parent");
     if (perm === "granted") {
       setHasNotifPerm(true);
       await sendPortalNotification(
@@ -468,30 +469,57 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   const unpaidMonthsPastCurrent = useMemo(() => ledgerEntries.filter((e) => !e.isPaid && e.isPastOrCurrent).length, [ledgerEntries]);
   const totalOverdueAmount = useMemo(() => unpaidMonthsPastCurrent * standardMonthlyFee, [unpaidMonthsPastCurrent, standardMonthlyFee]);
 
-  // 6. Attendance & Absence Logs with Strict Schedule Isolation (Group A: Sat/Mon/Wed, Group B: Sun/Tue/Thu)
+  // 6. Attendance & Absence Logs with Dynamic Date Series & Schedule Isolation (Group A: Sat/Mon/Wed, Group B: Sun/Tue/Thu)
   const attendanceScheduleLogs = useMemo(() => {
     const studentGroupDays = activeStudent.groupDays || "سبت - إثنين - أربعاء";
     const logs: AttendanceScheduleLog[] = [];
-    const allRecordedDates = new Set<string>();
+    const todayKey = getTodayKey();
 
-    // 1. All dates recorded in attendanceHistory for this student
-    // STRICT ISOLATION: Only include dates that strictly match the student's assigned group schedule
+    // 1. Gather all real dates where attendance was explicitly recorded in database/history for this student
+    const recordedDatesMap: Record<string, string> = {};
     Object.keys(attendanceHistory || {}).forEach((dateStr) => {
-      if (attendanceHistory[dateStr]?.[activeStudent.barcode]) {
-        if (isOfficialGroupDay(studentGroupDays, dateStr)) {
-          allRecordedDates.add(dateStr);
-        }
+      const st = attendanceHistory[dateStr]?.[activeStudent.barcode];
+      if (st) {
+        recordedDatesMap[dateStr] = st;
       }
     });
 
-    // 2. Today's scan - only include if today is strictly an official scheduled day for this group
-    const todayKey = getTodayKey();
-    if (attendanceToday[activeStudent.barcode] && isOfficialGroupDay(studentGroupDays, todayKey)) {
-      allRecordedDates.add(todayKey);
+    // Also include today's live scan if active
+    if (attendanceToday[activeStudent.barcode]) {
+      recordedDatesMap[todayKey] = attendanceToday[activeStudent.barcode];
     }
 
-    // Sort descending (newest first)
-    const sortedDates = Array.from(allRecordedDates).sort((a, b) => b.localeCompare(a));
+    // 2. Determine start date for generating the official schedule series:
+    // Determine the earliest boundary between: student creation, earliest recorded attendance, or current month cycle
+    const allMatchingRecordedDates = Object.keys(recordedDatesMap).filter((d) =>
+      isOfficialGroupDay(studentGroupDays, d)
+    );
+
+    let startDate = "";
+    if (allMatchingRecordedDates.length > 0) {
+      startDate = allMatchingRecordedDates.reduce((min, d) => (d < min ? d : min), todayKey);
+    }
+
+    // If student has createdAt date, ensure the timeline covers from enrollment
+    if (activeStudent.createdAt && activeStudent.createdAt.length >= 10) {
+      const createdDateKey = activeStudent.createdAt.slice(0, 10);
+      if (!startDate || createdDateKey < startDate) {
+        startDate = createdDateKey;
+      }
+    }
+
+    // Fallback: at minimum, generate the schedule from the start of the current month (up to 30 days back)
+    if (!startDate) {
+      const [curYear, curMonth] = todayKey.split("-");
+      startDate = `${curYear}-${curMonth}-01`;
+    }
+
+    // 3. Generate unbroken series of scheduled dates matching the student's group schedule
+    const scheduledDates = generateScheduledDateSeries(startDate, todayKey, studentGroupDays);
+
+    // Combine all unique dates: all scheduled dates + any historical recorded dates that match group schedule
+    const allDatesSet = new Set<string>([...scheduledDates, ...allMatchingRecordedDates]);
+    const sortedDates = Array.from(allDatesSet).sort((a, b) => b.localeCompare(a));
 
     sortedDates.forEach((dateStr) => {
       // Secondary safety check: strictly skip any cross-day or off-schedule entries
@@ -500,17 +528,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       }
 
       const rawStatus = dateStr === todayKey
-        ? (attendanceToday[activeStudent.barcode] || attendanceHistory[dateStr]?.[activeStudent.barcode])
-        : attendanceHistory[dateStr]?.[activeStudent.barcode];
-
-      if (!rawStatus) return;
-
-      // Normalize status: "حضور", "حاضر", "تأخير", "غائب", "غياب", "إذن"
-      let finalStatus: "حضور" | "تأخير" | "غائب" | "إذن" = "حضور";
-      if (rawStatus === "حاضر" || rawStatus === "حضور") finalStatus = "حضور";
-      else if (rawStatus === "تأخير") finalStatus = "تأخير";
-      else if (rawStatus === "غائب" || rawStatus === "غياب") finalStatus = "غائب";
-      else if (rawStatus === "إذن") finalStatus = "إذن";
+        ? (attendanceToday[activeStudent.barcode] || recordedDatesMap[dateStr])
+        : recordedDatesMap[dateStr];
 
       // Timezone-safe Arabic day name calculation
       const parts = dateStr.split("-").map(Number);
@@ -521,15 +540,37 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         dayName = dayNames[safeDate.getDay()];
       }
 
-      logs.push({
-        date: dateStr,
-        dayName,
-        status: finalStatus,
-        timeRecorded: dateStr === todayKey ? scanLogTimes[activeStudent.barcode] : undefined,
-        isOfficialScheduledDay: true,
-        isSubstituteDay: false,
-        note: `حصة رسمية مجدولة - ${studentGroupDays}`,
-      });
+      if (rawStatus) {
+        // Normalize status: "حضور", "حاضر", "تأخير", "غائب", "غياب", "إذن"
+        let finalStatus: "حضور" | "تأخير" | "غائب" | "إذن" = "حضور";
+        if (rawStatus === "حاضر" || rawStatus === "حضور") finalStatus = "حضور";
+        else if (rawStatus === "تأخير") finalStatus = "تأخير";
+        else if (rawStatus === "غائب" || rawStatus === "غياب") finalStatus = "غائب";
+        else if (rawStatus === "إذن") finalStatus = "إذن";
+
+        logs.push({
+          date: dateStr,
+          dayName,
+          status: finalStatus,
+          timeRecorded: dateStr === todayKey ? scanLogTimes[activeStudent.barcode] : undefined,
+          isOfficialScheduledDay: true,
+          isSubstituteDay: false,
+          isAutoGenerated: false,
+          note: `حصة رسمية مسجلة - ${studentGroupDays}`,
+        });
+      } else {
+        // Scheduled day with unrecorded attendance slot (preserves slot and eliminates data gaps)
+        const isToday = dateStr === todayKey;
+        logs.push({
+          date: dateStr,
+          dayName,
+          status: "لم ترصد",
+          isOfficialScheduledDay: true,
+          isSubstituteDay: false,
+          isAutoGenerated: true,
+          note: isToday ? "حصة اليوم المجدولة - بانتظار تسجيل الحضور" : "حصة رسمية مجدولة - لم يرصد غياب أو حضور",
+        });
+      }
     });
 
     return logs;
@@ -540,7 +581,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     if (attendanceFilter === "all") return attendanceScheduleLogs;
     if (attendanceFilter === "present") return attendanceScheduleLogs.filter((l) => l.status === "حضور");
     if (attendanceFilter === "absent") return attendanceScheduleLogs.filter((l) => l.status === "غائب");
-    if (attendanceFilter === "substitute") return attendanceScheduleLogs.filter((l) => l.isSubstituteDay || l.status === "تأخير" || l.status === "إذن");
+    if (attendanceFilter === "substitute") return attendanceScheduleLogs.filter((l) => l.isSubstituteDay || l.status === "تأخير" || l.status === "إذن" || l.status === "لم ترصد");
     return attendanceScheduleLogs;
   }, [attendanceScheduleLogs, attendanceFilter]);
 
@@ -1229,6 +1270,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                       const isAbsent = log.status === "غائب";
                       const isDelay = log.status === "تأخير";
                       const isExcuse = log.status === "إذن";
+                      const isUnrecorded = log.status === "لم ترصد" || log.status === "غير محدد";
 
                       return (
                         <tr key={idx} className="hover:bg-slate-800/40 transition">
@@ -1277,7 +1319,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                                 إذن مسبق
                               </span>
                             )}
-                            {!isPresent && !isAbsent && !isDelay && !isExcuse && (
+                            {isUnrecorded && (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-800 border border-amber-500/30 text-amber-300 font-bold text-xs">
+                                <AlertTriangle className="w-3 h-3 text-amber-400" />
+                                لم ترصد بعد
+                              </span>
+                            )}
+                            {!isPresent && !isAbsent && !isDelay && !isExcuse && !isUnrecorded && (
                               <span className="text-slate-500 font-mono">-</span>
                             )}
                           </td>

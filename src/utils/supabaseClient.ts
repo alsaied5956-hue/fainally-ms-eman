@@ -484,3 +484,39 @@ export async function fetchStudentAttendanceBySchedule(
 
   return data;
 }
+
+/**
+ * Invokes the database stored procedure to fetch an unbroken date series strictly matching
+ * the student's group schedule (Sat/Mon/Wed for Group A, Sun/Tue/Thu for Group B)
+ * outer-joined with real attendance records to prevent missing date gaps.
+ */
+export async function fetchStudentCompleteScheduleAttendance(
+  barcode: string,
+  startDate: string,
+  endDate?: string
+): Promise<Array<{
+  student_id: string;
+  barcode: string;
+  student_name: string;
+  group_days: string;
+  date_key: string;
+  day_of_week: number;
+  day_name: string;
+  status: string;
+  is_recorded: boolean;
+  time_recorded?: string;
+}>> {
+  const b = String(barcode).trim();
+  const { data, error } = await supabase.rpc("get_student_complete_schedule_attendance", {
+    p_barcode: b,
+    p_start_date: startDate,
+    p_end_date: endDate || new Date().toISOString().split("T")[0],
+  });
+
+  if (error || !data) {
+    console.warn("get_student_complete_schedule_attendance RPC error:", error);
+    return [];
+  }
+
+  return data;
+}

@@ -140,6 +140,45 @@ export function filterDatesByGroupSchedule(dates: string[], groupDays: string = 
   return dates.filter((dateStr) => isOfficialGroupDay(groupDays, dateStr));
 }
 
+/**
+ * Generates an unbroken array of all official scheduled dates (YYYY-MM-DD) between startDate and endDate
+ * strictly matching the student's assigned group schedule.
+ * - Group A: Saturday, Monday, Wednesday ONLY
+ * - Group B: Sunday, Tuesday, Thursday ONLY
+ * This completely eliminates date gaps in student attendance records.
+ */
+export function generateScheduledDateSeries(
+  startDateStr: string,
+  endDateStr: string = getTodayKey(),
+  groupDays: string = "سبت - إثنين - أربعاء"
+): string[] {
+  const result: string[] = [];
+  if (!startDateStr || !endDateStr) return result;
+
+  const [sYear, sMonth, sDay] = startDateStr.split("-").map(Number);
+  const [eYear, eMonth, eDay] = endDateStr.split("-").map(Number);
+
+  const start = new Date(sYear, sMonth - 1, sDay, 12, 0, 0);
+  const end = new Date(eYear, eMonth - 1, eDay, 12, 0, 0);
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
+    return result;
+  }
+
+  const cur = new Date(start);
+  while (cur <= end) {
+    if (isOfficialGroupDay(groupDays, cur)) {
+      const y = cur.getFullYear();
+      const m = String(cur.getMonth() + 1).padStart(2, "0");
+      const d = String(cur.getDate()).padStart(2, "0");
+      result.push(`${y}-${m}-${d}`);
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return result;
+}
+
 // Convert Arabic digits to English, remove non-digits, and normalize Egypt WhatsApp
 export function cleanPhoneNumber(phone?: string): string {
   if (!phone) return "";
