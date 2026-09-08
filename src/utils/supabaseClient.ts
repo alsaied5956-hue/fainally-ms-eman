@@ -520,3 +520,31 @@ export async function fetchStudentCompleteScheduleAttendance(
 
   return data;
 }
+
+/**
+ * Records student group transfer in Supabase for audit compliance and schedule isolation
+ */
+export async function recordStudentGroupHistoryInSupabase(record: {
+  barcode: string;
+  groupDays: string;
+  effectiveFrom: string;
+  effectiveTo?: string;
+  reason?: string;
+}): Promise<void> {
+  try {
+    const studentId = await getStudentIdByBarcode(record.barcode);
+    if (!studentId) return;
+
+    await supabase.from("student_group_history").insert({
+      student_id: studentId,
+      barcode: String(record.barcode).trim(),
+      group_days: record.groupDays,
+      effective_from: record.effectiveFrom,
+      effective_to: record.effectiveTo || null,
+      reason: record.reason || "تحويل مجموعة دراسية",
+    });
+  } catch (err) {
+    console.warn("recordStudentGroupHistoryInSupabase error:", err);
+  }
+}
+

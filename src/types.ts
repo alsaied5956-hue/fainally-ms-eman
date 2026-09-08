@@ -23,6 +23,14 @@ export const GRADE_ORDER: GradeName[] = [
 
 export type GroupDays = "سبت - إثنين - أربعاء" | "أحد - ثلاثاء - خميس";
 
+export interface GroupHistoryEntry {
+  groupDays: GroupDays;
+  effectiveFrom: string; // YYYY-MM-DD
+  effectiveTo?: string; // YYYY-MM-DD
+  changedAt: string;     // ISO timestamp
+  reason?: string;
+}
+
 export interface Student {
   barcode: string;
   name: string;
@@ -30,6 +38,7 @@ export interface Student {
   parentPhone: string;
   groupGrade: GradeName;
   groupDays: GroupDays;
+  groupHistory?: GroupHistoryEntry[]; // Historical audit log for mid-term group shifts
   customMonthlyFee?: number; // السعر المخصص للطالب (مثلا 50 أو 60 أو 70 أو 80 أو إعفاء كامل)
   discountReason?: string; // سبب الخصم أو ملاحظات (أيتام، خصم إخوة، تفوق)
   points: number;

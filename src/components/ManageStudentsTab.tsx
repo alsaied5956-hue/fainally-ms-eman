@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER, PaymentRecord } from "../types";
-import { sortStudentsByGradeAndName, getExamAverage, getAbsenceRate, DEFAULT_GRADE_PRICES, cleanPhoneNumber } from "../utils/helpers";
+import { sortStudentsByGradeAndName, getExamAverage, getAbsenceRate, DEFAULT_GRADE_PRICES, cleanPhoneNumber, getTodayKey } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { StudentFinancialLedgerModal } from "./StudentFinancialLedgerModal";
 import { Users2, Trash2, Edit3, Search, AlertTriangle, Tag, Sparkles, X, CreditCard, FileText } from "lucide-react";
+import { recordStudentGroupHistoryInSupabase } from "../utils/supabaseClient";
 
 interface ManageStudentsTabProps {
   students: Student[];
@@ -95,6 +96,29 @@ export const ManageStudentsTab: React.FC<ManageStudentsTabProps> = ({
       ? Math.max(0, isNaN(Number(editingStudent.customMonthlyFee)) ? 0 : Number(editingStudent.customMonthlyFee))
       : undefined;
 
+    // Audit Mid-Term Group Transfer History
+    const originalStudent = students.find((s) => s.barcode === oldBarcode);
+    const existingHistory = originalStudent?.groupHistory ? [...originalStudent.groupHistory] : [];
+    if (originalStudent && originalStudent.groupDays !== editingStudent.groupDays) {
+      const todayKey = getTodayKey();
+      const newEntry = {
+        groupDays: originalStudent.groupDays,
+        effectiveFrom: originalStudent.createdAt ? originalStudent.createdAt.slice(0, 10) : "2026-08-01",
+        effectiveTo: todayKey,
+        changedAt: new Date().toISOString(),
+        reason: "تحويل مجموعة دراسية خلال الفصل",
+      };
+      existingHistory.push(newEntry);
+
+      recordStudentGroupHistoryInSupabase({
+        barcode: trimmedBarcode,
+        groupDays: originalStudent.groupDays,
+        effectiveFrom: newEntry.effectiveFrom,
+        effectiveTo: newEntry.effectiveTo,
+        reason: newEntry.reason,
+      }).catch(console.warn);
+    }
+
     const studentToSave: Student = {
       ...editingStudent,
       barcode: trimmedBarcode,
@@ -102,6 +126,7 @@ export const ManageStudentsTab: React.FC<ManageStudentsTabProps> = ({
       phone: normalizedPhone || normalizedParentPhone,
       parentPhone: normalizedParentPhone || normalizedPhone,
       customMonthlyFee: sanitizedFee,
+      groupHistory: existingHistory.length > 0 ? existingHistory : editingStudent.groupHistory,
     };
 
     onUpdateStudent(oldBarcode, studentToSave);

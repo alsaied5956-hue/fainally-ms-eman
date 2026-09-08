@@ -235,9 +235,32 @@ end;
 $$ language plpgsql security definer;
 
 -- ==============================================================================
+-- STUDENT GROUP TRANSFER AUDIT HISTORY
+-- Maintains historical group changes so past attendance aligns with past schedule
+-- ==============================================================================
+create table if not exists public.student_group_history (
+    id uuid primary key default uuid_generate_v4(),
+    student_id uuid references public.students(id) on delete cascade,
+    barcode text not null,
+    group_days text not null, -- 'سبت - إثنين - أربعاء' or 'أحد - ثلاثاء - خميس'
+    effective_from date not null,
+    effective_to date,
+    reason text default 'تحويل مجموعة دراسية',
+    created_at timestamptz not null default now()
+);
+
+create index if not exists idx_group_history_student on public.student_group_history(student_id);
+create index if not exists idx_group_history_barcode on public.student_group_history(barcode);
+
+alter table public.student_group_history enable row level security;
+create policy "Allow all operations on student_group_history" on public.student_group_history
+    for all using (true) with check (true);
+
+-- ==============================================================================
 -- DYNAMIC DATE SERIES & OUTER-JOIN ATTENDANCE (PREVENTS MISSING DATES)
 -- Generates an unbroken calendar strictly for student's group (A: Sat/Mon/Wed, B: Sun/Tue/Thu)
 -- Outer-joins with real attendance_logs, marking unrecorded dates as 'لم ترصد'
+-- Respects historical group shifts when records exist in student_group_history
 -- ==============================================================================
 create or replace function public.get_student_complete_schedule_attendance(
     p_barcode text,
@@ -258,7 +281,7 @@ returns table (
 ) as $$
 declare
     v_student public.students%rowtype;
-    v_is_group_a boolean;
+    v_has_history boolean;
 begin
     -- 1. Fetch student master record
     select * into v_student
@@ -270,10 +293,13 @@ begin
         return;
     end if;
 
-    -- 2. Determine schedule group
-    v_is_group_a := (v_student.group_days like '%سبت%' or v_student.group_days ilike '%group a%' or v_student.group_days ilike '%sat%');
+    -- Check if student has mid-term transfer history
+    select exists (
+        select 1 from public.student_group_history sgh
+        where sgh.student_id = v_student.id
+    ) into v_has_history;
 
-    -- 3. Return unbroken dynamic date series joined with real attendance logs
+    -- 2. Return unbroken dynamic date series joined with real attendance logs
     return query
     with recursive_calendar as (
         select 
@@ -287,27 +313,48 @@ begin
                 when 4 then 'الخميس'
                 when 5 then 'الجمعة'
                 when 6 then 'السبت'
-            end as arabic_day_name
+            end as arabic_day_name,
+            -- Resolve effective group on that date (from history or current)
+            coalesce(
+                (
+                    select sgh.group_days 
+                    from public.student_group_history sgh
+                    where sgh.student_id = v_student.id 
+                      and d::date >= sgh.effective_from 
+                      and (sgh.effective_to is null or d::date <= sgh.effective_to)
+                    order by sgh.effective_from desc limit 1
+                ),
+                v_student.group_days
+            ) as effective_group
         from generate_series(p_start_date::timestamp, p_end_date::timestamp, '1 day'::interval) d
-        where (v_is_group_a and extract(dow from d)::int in (6, 1, 3))
-           or (not v_is_group_a and extract(dow from d)::int in (0, 2, 4))
+    ),
+    filtered_calendar as (
+        select *
+        from recursive_calendar rc
+        where (
+            (rc.effective_group like '%سبت%' or rc.effective_group ilike '%sat%')
+            and rc.dow in (6, 1, 3)
+        ) or (
+            (rc.effective_group like '%أحد%' or rc.effective_group ilike '%sun%')
+            and rc.dow in (0, 2, 4)
+        )
     )
     select 
         v_student.id as student_id,
         v_student.barcode,
         v_student.name as student_name,
-        v_student.group_days,
-        to_char(rc.sched_date, 'YYYY-MM-DD') as date_key,
-        rc.dow as day_of_week,
-        rc.arabic_day_name as day_name,
+        fc.effective_group as group_days,
+        to_char(fc.sched_date, 'YYYY-MM-DD') as date_key,
+        fc.dow as day_of_week,
+        fc.arabic_day_name as day_name,
         coalesce(a.status, 'لم ترصد') as status,
         (a.id is not null) as is_recorded,
         a.time_recorded
-    from recursive_calendar rc
+    from filtered_calendar fc
     left join public.attendance_logs a 
         on a.student_id = v_student.id 
-       and a.date_key = to_char(rc.sched_date, 'YYYY-MM-DD')
-    order by rc.sched_date desc;
+       and a.date_key = to_char(fc.sched_date, 'YYYY-MM-DD')
+    order by fc.sched_date desc;
 end;
 $$ language plpgsql security definer;
 

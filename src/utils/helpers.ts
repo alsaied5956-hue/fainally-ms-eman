@@ -141,8 +141,31 @@ export function filterDatesByGroupSchedule(dates: string[], groupDays: string = 
 }
 
 /**
+ * Resolves which group schedule (Group A or Group B) was active on a specific historical date.
+ * Takes into account mid-term transfers recorded in groupHistory.
+ */
+export function resolveEffectiveGroupForDate(
+  dateStr: string,
+  currentGroupDays: string = "سبت - إثنين - أربعاء",
+  groupHistory?: Array<{ groupDays: string; effectiveFrom: string; effectiveTo?: string }>
+): string {
+  if (!groupHistory || groupHistory.length === 0) return currentGroupDays;
+
+  // Search historical audit log
+  for (const entry of groupHistory) {
+    const from = entry.effectiveFrom || "2000-01-01";
+    const to = entry.effectiveTo || "9999-12-31";
+    if (dateStr >= from && dateStr <= to) {
+      return entry.groupDays;
+    }
+  }
+
+  return currentGroupDays;
+}
+
+/**
  * Generates an unbroken array of all official scheduled dates (YYYY-MM-DD) between startDate and endDate
- * strictly matching the student's assigned group schedule.
+ * strictly matching the student's assigned group schedule, respecting historical group transfers.
  * - Group A: Saturday, Monday, Wednesday ONLY
  * - Group B: Sunday, Tuesday, Thursday ONLY
  * This completely eliminates date gaps in student attendance records.
@@ -150,7 +173,8 @@ export function filterDatesByGroupSchedule(dates: string[], groupDays: string = 
 export function generateScheduledDateSeries(
   startDateStr: string,
   endDateStr: string = getTodayKey(),
-  groupDays: string = "سبت - إثنين - أربعاء"
+  groupDays: string = "سبت - إثنين - أربعاء",
+  groupHistory?: Array<{ groupDays: string; effectiveFrom: string; effectiveTo?: string }>
 ): string[] {
   const result: string[] = [];
   if (!startDateStr || !endDateStr) return result;
@@ -167,11 +191,14 @@ export function generateScheduledDateSeries(
 
   const cur = new Date(start);
   while (cur <= end) {
-    if (isOfficialGroupDay(groupDays, cur)) {
-      const y = cur.getFullYear();
-      const m = String(cur.getMonth() + 1).padStart(2, "0");
-      const d = String(cur.getDate()).padStart(2, "0");
-      result.push(`${y}-${m}-${d}`);
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, "0");
+    const d = String(cur.getDate()).padStart(2, "0");
+    const dateStrKey = `${y}-${m}-${d}`;
+
+    const effectiveGroup = resolveEffectiveGroupForDate(dateStrKey, groupDays, groupHistory);
+    if (isOfficialGroupDay(effectiveGroup, cur)) {
+      result.push(dateStrKey);
     }
     cur.setDate(cur.getDate() + 1);
   }
