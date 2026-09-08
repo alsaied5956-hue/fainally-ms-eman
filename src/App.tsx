@@ -42,7 +42,6 @@ import {
   formatArabicDate,
   formatTimeArabic,
 } from "./utils/helpers";
-import { sendPortalNotification } from "./utils/portalNotifications";
 import {
   broadcastGroupFinished,
   broadcastPaymentChange,
@@ -1033,21 +1032,6 @@ export default function App() {
 
     setStudents(updated);
     saveStudentsData(updated);
-
-    // 🔔 Real Web Push to parent's device even if their app is closed
-    const student = students.find((s) => s.barcode === barcode);
-    if (student) {
-      sendPortalNotification(
-        `رصد نتيجة اختبار: ${student.name} 📝`,
-        `الامتحان: ${examTitle} | الدرجة: ${scoreFormatted}`,
-        "grade",
-        {
-          targetBarcodes: [barcode],
-          targetPhone: student.parentPhone || student.phone,
-          url: `/?tab=grades&barcode=${barcode}`,
-        }
-      ).catch(() => {});
-    }
   }, [students]);
 
   // Handler: Update Grade Record from Cumulative Table

@@ -28,7 +28,6 @@ import {
 } from "../../utils/helpers";
 import { printElement } from "../../utils/print";
 import { PWAInstallButton } from "./PWAInstallButton";
-import { PushNotificationModal } from "./PushNotificationModal";
 import {
   User,
   Users,
@@ -177,37 +176,14 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     return chatMessages.filter((m) => m.sender === "admin" && !m.isRead).length;
   }, [chatMessages]);
 
-  const [isPushModalOpen, setIsPushModalOpen] = useState(false);
-
-  // Auto-register Push Subscription for active parent on mount if browser permission was already granted
-  useEffect(() => {
-    if (isNotificationSupported() && Notification.permission === "granted") {
-      import("../../services/pushNotificationService")
-        .then(({ registerPushSubscription }) => {
-          registerPushSubscription(
-            account.parentPhone || activeStudent.barcode,
-            "parent",
-            allChildBarcodes,
-            account.parentPhone
-          ).catch(() => {});
-        })
-        .catch(() => {});
-    }
-  }, [account, activeStudent.barcode, allChildBarcodes]);
-
-  // Request push notification permission and register background push with VAPID
+  // Request push notification permission
   const handleEnableNotifications = async () => {
-    const perm = await requestNotificationPermission(
-      account.parentPhone || activeStudent.barcode,
-      "parent",
-      allChildBarcodes,
-      account.parentPhone
-    );
+    const perm = await requestNotificationPermission(activeStudent.barcode || account.parentPhone, "parent");
     if (perm === "granted") {
       setHasNotifPerm(true);
       await sendPortalNotification(
         "منظومة الأستاذة إيمان الدمشيتي",
-        `تم تفعيل الإشعارات الصوتية والمباشرة بنجاح لمتابعة الطالب (${activeStudent.name}) حتى والتطبيق مقفول!`,
+        `تم تفعيل الإشعارات الصوتية والمباشرة بنجاح لمتابعة الطالب (${activeStudent.name})!`,
         "grade"
       );
     }
@@ -727,17 +703,6 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         `ولي أمر (${activeStudent.name})`,
         text
       );
-
-      // 🔔 Dispatch Real Push to Admin's device (even when admin's app is closed)
-      sendPortalNotification(
-        `رسالة جديدة من ولي أمر الطالب ${activeStudent.name} 💬`,
-        `${text.slice(0, 90)}`,
-        "chat",
-        {
-          targetRole: "admin",
-          url: `/?tab=chats&barcode=${activeStudent.barcode}`,
-        }
-      ).catch(() => {});
     } catch (err) {
       console.warn("Failed to send chat:", err);
     } finally {
@@ -810,17 +775,6 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
             {/* PWA Install Button */}
             <PWAInstallButton variant="compact" />
-
-            {/* Background Push Notification Settings & Test */}
-            <button
-              type="button"
-              onClick={() => setIsPushModalOpen(true)}
-              className="px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 hover:text-amber-200 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
-              title="إعداد واختبار استلام الإشعارات والتطبيق مقفول"
-            >
-              <BellRing className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-              <span className="hidden md:inline">إشعارات الهاتف</span>
-            </button>
 
             {/* Logout */}
             <button
@@ -947,22 +901,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
               <BellRing className="w-4 h-4 text-amber-400 animate-pulse" />
               <span>فعل الإشعارات الفورية والصوتية ليصلك إشعار فوري بحضور أو غياب أو درجات ابنك!</span>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleEnableNotifications}
-                className="px-3 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-sm"
-              >
-                تفعيل الإشعارات الصوتية الآن
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsPushModalOpen(true)}
-                className="px-3 py-1 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-bold transition cursor-pointer"
-              >
-                دليل واختبار الهاتف مقفول
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleEnableNotifications}
+              className="px-3 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer shadow-sm"
+            >
+              تفعيل الإشعارات الصوتية الآن
+            </button>
           </div>
         </div>
       )}
@@ -2375,17 +2320,6 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
           </div>
         </div>
       )}
-
-      {/* Push Notification Background Modal & Live Tester */}
-      <PushNotificationModal
-        isOpen={isPushModalOpen}
-        onClose={() => setIsPushModalOpen(false)}
-        userId={account.parentPhone || activeStudent.barcode}
-        userRole="parent"
-        barcodes={allChildBarcodes}
-        phone={account.parentPhone}
-        userName={activeStudent.name}
-      />
     </div>
   );
 };

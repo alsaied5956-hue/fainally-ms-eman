@@ -28,7 +28,6 @@ import {
   requestNotificationPermission,
 } from "../../utils/portalNotifications";
 import { PWAInstallButton } from "./PWAInstallButton";
-import { PushNotificationModal } from "./PushNotificationModal";
 import {
   ShieldAlert,
   Users,
@@ -273,21 +272,6 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       return matchesSearch && matchesStatus && matchesGrade;
     });
   }, [unifiedAccountsList, searchQuery, statusFilter, gradeFilter]);
-
-  const [isPushModalOpen, setIsPushModalOpen] = useState(false);
-
-  // Register Admin for background push notifications if permission was granted
-  useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      if (Notification.permission === "granted") {
-        import("../../services/pushNotificationService")
-          .then(({ registerPushSubscription }) => {
-            registerPushSubscription("admin-supervisor", "admin").catch(() => {});
-          })
-          .catch(() => {});
-      }
-    }
-  }, []);
 
   // Realtime subscription for all chats across the system (WhatsApp-style instant updates)
   useEffect(() => {
@@ -645,19 +629,6 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       // Update allChats to instantly bring this thread to top of WhatsApp list
       setAllChats(getLocalChatMessages());
 
-      // 🔔 Dispatch Real Web Push to Parent's device (even when their app is closed)
-      const targetStudent = students.find((s) => s.barcode === selectedChatBarcode);
-      sendPortalNotification(
-        `رسالة جديدة من إدارة المنظومة 💬`,
-        `الأستاذة إيمان الدمشيتي: ${text.slice(0, 90)}`,
-        "chat",
-        {
-          targetBarcodes: [selectedChatBarcode],
-          targetPhone: targetStudent?.parentPhone || targetStudent?.phone,
-          url: `/?tab=chat&barcode=${selectedChatBarcode}`,
-        }
-      ).catch(() => {});
-
       setTimeout(() => {
         chatInputRef.current?.focus();
         chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -710,17 +681,6 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
           <div className="flex items-center gap-2 sm:gap-3">
             <PWAInstallButton variant="compact" />
-
-            {/* Admin Background Push Settings */}
-            <button
-              type="button"
-              onClick={() => setIsPushModalOpen(true)}
-              className="px-3 py-1.5 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
-              title="إعداد واختبار استلام إشعارات الإشراف والتطبيق مقفول"
-            >
-              <BellRing className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-              <span className="hidden md:inline">إشعارات الهاتف</span>
-            </button>
 
             <button
               type="button"
@@ -2032,15 +1992,6 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
           </div>
         </div>
       )}
-
-      {/* Admin Background Push Notification Settings & Live Tester */}
-      <PushNotificationModal
-        isOpen={isPushModalOpen}
-        onClose={() => setIsPushModalOpen(false)}
-        userId="admin-supervisor"
-        userRole="admin"
-        userName="المشرف العام"
-      />
     </div>
   );
 };
