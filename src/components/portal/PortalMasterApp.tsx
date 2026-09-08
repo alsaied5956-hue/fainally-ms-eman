@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Student, PaymentRecord } from "../../types";
+import { Student, PaymentRecord, GradeName } from "../../types";
 import { ParentAccount, PortalSession } from "../../types/portal";
 import {
   getSavedPortalSession,
@@ -17,6 +17,7 @@ interface PortalMasterAppProps {
   attendanceHistory: Record<string, Record<string, string>>;
   payments: Record<string, Record<string, PaymentRecord>>;
   scanLogTimes: Record<string, string>;
+  groupPrices?: Record<GradeName, number>;
 }
 
 export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
@@ -25,6 +26,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
   attendanceHistory,
   payments,
   scanLogTimes,
+  groupPrices,
 }) => {
   // Portal session state
   const [session, setSession] = useState<PortalSession | null>(() => {
@@ -136,6 +138,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
         attendanceToday={attendanceToday}
         payments={payments}
         scanLogTimes={scanLogTimes}
+        groupPrices={groupPrices}
         onLogout={() => handleLogout(false)}
         onUpdateAccount={handleUpdateAccount}
       />

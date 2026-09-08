@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { Student, PaymentRecord, GroupDays } from "../../types";
+import { Student, PaymentRecord, GroupDays, GradeName } from "../../types";
 import {
   ParentAccount,
   ParentChatMessage,
@@ -18,7 +18,13 @@ import {
   requestNotificationPermission,
   isNotificationSupported,
 } from "../../utils/portalNotifications";
-import { getTodayKey, getArabicDayName } from "../../utils/helpers";
+import {
+  getTodayKey,
+  getArabicDayName,
+  DEFAULT_GRADE_PRICES,
+  isOfficialGroupDay,
+} from "../../utils/helpers";
+import { printElement } from "../../utils/print";
 import { PWAInstallButton } from "./PWAInstallButton";
 import {
   User,
@@ -47,6 +53,11 @@ import {
   ExternalLink,
   ShieldCheck,
   Check,
+  Printer,
+  FileText,
+  Filter,
+  Eye,
+  X,
 } from "lucide-react";
 
 interface ParentPortalDashboardProps {
@@ -56,6 +67,7 @@ interface ParentPortalDashboardProps {
   attendanceToday: Record<string, string>;
   payments: Record<string, Record<string, PaymentRecord>>;
   scanLogTimes: Record<string, string>;
+  groupPrices?: Record<GradeName, number>;
   onLogout: () => void;
   onUpdateAccount: (updated: ParentAccount) => void;
 }
@@ -67,6 +79,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   attendanceToday,
   payments,
   scanLogTimes,
+  groupPrices,
   onLogout,
   onUpdateAccount,
 }) => {
@@ -77,6 +90,19 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   // Active navigation tab
   const [activeTab, setActiveTab] = useState<ParentPortalTab>("dashboard");
+
+  // Financial Sub-Tab: "ledger" (full academic year) vs "receipts" (recorded receipts)
+  const [activeFinancialSubTab, setActiveFinancialSubTab] = useState<"ledger" | "receipts">("ledger");
+
+  // Printable / Viewable Receipt Modal State
+  const [selectedReceiptForModal, setSelectedReceiptForModal] = useState<{
+    monthLabel: string;
+    monthKey: string;
+    payRecord: PaymentRecord;
+  } | null>(null);
+
+  // Attendance filter state: "all", "present", "absent", "substitute"
+  const [attendanceFilter, setAttendanceFilter] = useState<"all" | "present" | "absent" | "substitute">("all");
 
   // Multi-student modal state
   const [showAddChildModal, setShowAddChildModal] = useState(false);
@@ -215,32 +241,48 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   const isInitialPaymentsMount = useRef(true);
 
   useEffect(() => {
+    // Helper to count how many months this student has paid
+    const countStudentPaidMonths = (bCode: string) => {
+      let count = 0;
+      Object.keys(payments || {}).forEach((mKey) => {
+        if (payments[mKey]?.[bCode]) count++;
+      });
+      return count;
+    };
+
     if (isInitialPaymentsMount.current) {
       isInitialPaymentsMount.current = false;
       const initialMap: Record<string, number> = {};
       allChildBarcodes.forEach((b) => {
-        initialMap[b] = payments[b] ? Object.keys(payments[b]).length : 0;
+        initialMap[b] = countStudentPaidMonths(b);
       });
       prevPaymentsMapRef.current = initialMap;
       return;
     }
 
     allChildBarcodes.forEach((barcode) => {
-      const studentPayments = payments[barcode] || {};
-      const currentCount = Object.keys(studentPayments).length;
+      const currentCount = countStudentPaidMonths(barcode);
       const prevCount = prevPaymentsMapRef.current[barcode] || 0;
 
       if (currentCount > prevCount) {
         const studentObj = students.find((s) => s.barcode === barcode);
         const sName = studentObj?.name || "الطالب";
-        const allMonths = Object.keys(studentPayments);
-        const latestMonth = allMonths[allMonths.length - 1];
-        const latestRec = studentPayments[latestMonth];
+
+        // Find latest payment record
+        let latestRec: PaymentRecord | undefined;
+        Object.keys(payments || {}).forEach((mKey) => {
+          const rec = payments[mKey]?.[barcode];
+          if (rec) {
+            if (!latestRec || (rec.date && rec.date > (latestRec.date || ""))) {
+              latestRec = rec;
+            }
+          }
+        });
 
         if (latestRec) {
           sendPortalNotification(
             "💳 تأكيد سداد المصروفات",
-            `تم استلام سداد اشتراك شهر (${latestRec.month}) للطالب (${sName}) بمبلغ ${latestRec.amount} ج.م بنجاح.`,
+            `تم استلام سداد اشتراك شهر (${latestRec.month || latestRec.monthKey}) للطالب (${sName}) بمبلغ ${latestRec.amount} ج.م بنجاح.`,
             "fee"
           );
         }
@@ -315,20 +357,22 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   // CALCULATED METRICS FOR DASHBOARD
   // ----------------------------------------------------
 
-  // 1. Attendance & Absence Rates
-  const attendanceRate = useMemo(() => {
-    const pres = activeStudent.totalAttendanceDays || 0;
-    const abs = activeStudent.totalAbsentDays || 0;
-    const total = pres + abs;
-    if (total === 0) return 100;
-    return Math.round((pres / total) * 100);
-  }, [activeStudent]);
+  // 1. Approved Original Monthly Fee for Student
+  const studentGrade = (activeStudent.groupGrade || activeStudent.grade || "الصف الرابع الابتدائي") as GradeName;
+  const standardMonthlyFee = useMemo(() => {
+    if (activeStudent.customMonthlyFee !== undefined && activeStudent.customMonthlyFee !== null && activeStudent.customMonthlyFee > 0) {
+      return activeStudent.customMonthlyFee;
+    }
+    if (groupPrices && groupPrices[studentGrade] !== undefined) {
+      return groupPrices[studentGrade];
+    }
+    if (DEFAULT_GRADE_PRICES[studentGrade] !== undefined) {
+      return DEFAULT_GRADE_PRICES[studentGrade];
+    }
+    return 100;
+  }, [activeStudent.customMonthlyFee, groupPrices, studentGrade]);
 
-  const absenceRate = useMemo(() => {
-    return 100 - attendanceRate;
-  }, [attendanceRate]);
-
-  // 2. Current Month Payment Status
+  // 2. Current Month Key
   const currentMonthKey = useMemo(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -339,81 +383,186 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     return monthMap[activeStudent.barcode];
   }, [payments, currentMonthKey, activeStudent.barcode]);
 
-  // 3. Payment History
+  // 3. Payment History (All recorded payments for this student)
   const paymentHistoryList = useMemo(() => {
     const list: PaymentRecord[] = [];
-    Object.keys(payments).forEach((mKey) => {
+    Object.keys(payments || {}).forEach((mKey) => {
       const rec = payments[mKey]?.[activeStudent.barcode];
       if (rec) {
         list.push(rec);
       }
     });
-    // Sort descending by date
-    return list.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    // Sort descending by date or monthKey
+    return list.sort((a, b) => {
+      const dateA = a.date || a.monthKey || a.month || "";
+      const dateB = b.date || b.monthKey || b.month || "";
+      return dateB.localeCompare(dateA);
+    });
   }, [payments, activeStudent.barcode]);
 
-  // 4. Attendance & Absence Logs with Group Schedule Filtering
-  // Group A = "سبت - إثنين - أربعاء" (Saturdays, Mondays, Wednesdays)
-  // Group B = "أحد - ثلاثاء - خميس" (Sundays, Tuesdays, Thursdays)
-  const attendanceScheduleLogs = useMemo(() => {
-    const studentGroupDays = activeStudent.groupDays || "سبت - إثنين - أربعاء";
-    const isGroupA = studentGroupDays.includes("سبت") || studentGroupDays.includes("إثنين");
+  // 4. Academic Months (Full 12-Month Academic Ledger: August -> July)
+  const academicMonths = useMemo(() => {
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth() + 1; // 1-12
+    const startYear = currentMonth >= 8 ? currentYear : currentYear - 1;
+    const endYear = startYear + 1;
 
-    // Helper: is this date an official schedule day for this group?
-    const isOfficialDay = (dateStr: string) => {
-      const d = new Date(dateStr);
-      const dayNum = d.getDay(); // 0 = Sun, 1 = Mon, 2 = Tue, 3 = Wed, 4 = Thu, 5 = Fri, 6 = Sat
-      if (isGroupA) {
-        // Sat (6), Mon (1), Wed (3)
-        return dayNum === 6 || dayNum === 1 || dayNum === 3;
-      } else {
-        // Sun (0), Tue (2), Thu (4)
-        return dayNum === 0 || dayNum === 2 || dayNum === 4;
-      }
-    };
+    const list: { key: string; label: string; monthNumber: number; year: number }[] = [
+      { key: `${startYear}-08`, label: `أغسطس ${startYear}`, monthNumber: 8, year: startYear },
+      { key: `${startYear}-09`, label: `سبتمبر ${startYear}`, monthNumber: 9, year: startYear },
+      { key: `${startYear}-10`, label: `أكتوبر ${startYear}`, monthNumber: 10, year: startYear },
+      { key: `${startYear}-11`, label: `نوفمبر ${startYear}`, monthNumber: 11, year: startYear },
+      { key: `${startYear}-12`, label: `ديسمبر ${startYear}`, monthNumber: 12, year: startYear },
+      { key: `${endYear}-01`, label: `يناير ${endYear}`, monthNumber: 1, year: endYear },
+      { key: `${endYear}-02`, label: `فبراير ${endYear}`, monthNumber: 2, year: endYear },
+      { key: `${endYear}-03`, label: `مارس ${endYear}`, monthNumber: 3, year: endYear },
+      { key: `${endYear}-04`, label: `أبريل ${endYear}`, monthNumber: 4, year: endYear },
+      { key: `${endYear}-05`, label: `مايو ${endYear}`, monthNumber: 5, year: endYear },
+      { key: `${endYear}-06`, label: `يونيو ${endYear}`, monthNumber: 6, year: endYear },
+      { key: `${endYear}-07`, label: `يوليو ${endYear}`, monthNumber: 7, year: endYear },
+    ];
 
-    const logs: AttendanceScheduleLog[] = [];
-
-    // Combine history dates and today
-    const allDates = new Set<string>([
-      ...Object.keys(attendanceHistory),
-      getTodayKey(),
-    ]);
-
-    const sortedDates = Array.from(allDates).sort((a, b) => b.localeCompare(a));
-
-    sortedDates.forEach((dateStr) => {
-      const statusFromHistory = attendanceHistory[dateStr]?.[activeStudent.barcode];
-      const statusToday = dateStr === getTodayKey() ? attendanceToday[activeStudent.barcode] : undefined;
-      const finalStatus = (statusToday || statusFromHistory) as "حضور" | "تأخير" | "غائب" | "إذن" | undefined;
-
-      const official = isOfficialDay(dateStr);
-
-      // If student attended on a day that is NOT their official schedule, it's a cross-group substitute attendance!
-      const isSubstitute = !official && (finalStatus === "حضور" || finalStatus === "تأخير");
-
-      // Show log if:
-      // 1. It's an official schedule day (even if status is present or absent)
-      // 2. OR it's a cross-group substitute attendance day that the student attended!
-      if (official || isSubstitute) {
-        logs.push({
-          date: dateStr,
-          dayName: getArabicDayName(dateStr),
-          status: finalStatus || (official ? "غائب" : "غير محدد"),
-          timeRecorded: dateStr === getTodayKey() ? scanLogTimes[activeStudent.barcode] : undefined,
-          isOfficialScheduledDay: official,
-          isSubstituteDay: isSubstitute,
-          note: isSubstitute
-            ? "حضور تعويضي / بديل (عكس أيام المجموعة الرسمية)"
-            : official
-            ? "يوم رسمي لجدول المجموعة"
-            : undefined,
+    // Also include any payment months that exist in payments for this student outside standard list
+    Object.keys(payments || {}).forEach((mKey) => {
+      if (payments[mKey]?.[activeStudent.barcode] && !list.some((item) => item.key === mKey)) {
+        list.push({
+          key: mKey,
+          label: mKey,
+          monthNumber: parseInt(mKey.split("-")[1] || "1", 10),
+          year: parseInt(mKey.split("-")[0] || String(currentYear), 10),
         });
       }
     });
 
+    return list;
+  }, [payments, activeStudent.barcode]);
+
+  // 5. Full Academic Ledger Entries
+  const ledgerEntries = useMemo(() => {
+    return academicMonths.map((m) => {
+      const pay = payments[m.key]?.[activeStudent.barcode];
+      const isPaid = !!pay;
+      const paidAmount = pay ? pay.amount : 0;
+      const requiredAmount = standardMonthlyFee;
+      const balance = isPaid ? paidAmount - requiredAmount : -requiredAmount;
+      const isPastOrCurrent = m.key <= currentMonthKey;
+
+      return {
+        monthKey: m.key,
+        monthLabel: m.label,
+        isPaid,
+        paidAmount,
+        requiredAmount,
+        balance,
+        payRecord: pay,
+        isPastOrCurrent,
+      };
+    });
+  }, [academicMonths, payments, activeStudent.barcode, standardMonthlyFee, currentMonthKey]);
+
+  // Full Ledger Totals
+  const totalRequiredAnnual = useMemo(() => ledgerEntries.reduce((acc, curr) => acc + curr.requiredAmount, 0), [ledgerEntries]);
+  const totalPaidAnnual = useMemo(() => ledgerEntries.reduce((acc, curr) => acc + curr.paidAmount, 0), [ledgerEntries]);
+  const paidMonthsCount = useMemo(() => ledgerEntries.filter((e) => e.isPaid).length, [ledgerEntries]);
+  const unpaidMonthsPastCurrent = useMemo(() => ledgerEntries.filter((e) => !e.isPaid && e.isPastOrCurrent).length, [ledgerEntries]);
+  const totalOverdueAmount = useMemo(() => unpaidMonthsPastCurrent * standardMonthlyFee, [unpaidMonthsPastCurrent, standardMonthlyFee]);
+
+  // 6. Attendance & Absence Logs with Correct Days & Timezone Safety
+  const attendanceScheduleLogs = useMemo(() => {
+    const studentGroupDays = activeStudent.groupDays || "سبت - إثنين - أربعاء";
+    const logs: AttendanceScheduleLog[] = [];
+    const allRecordedDates = new Set<string>();
+
+    // 1. All dates recorded in attendanceHistory for this student
+    Object.keys(attendanceHistory || {}).forEach((dateStr) => {
+      if (attendanceHistory[dateStr]?.[activeStudent.barcode]) {
+        allRecordedDates.add(dateStr);
+      }
+    });
+
+    // 2. Today's scan
+    const todayKey = getTodayKey();
+    if (attendanceToday[activeStudent.barcode]) {
+      allRecordedDates.add(todayKey);
+    }
+
+    // Sort descending (newest first)
+    const sortedDates = Array.from(allRecordedDates).sort((a, b) => b.localeCompare(a));
+
+    sortedDates.forEach((dateStr) => {
+      const rawStatus = dateStr === todayKey
+        ? (attendanceToday[activeStudent.barcode] || attendanceHistory[dateStr]?.[activeStudent.barcode])
+        : attendanceHistory[dateStr]?.[activeStudent.barcode];
+
+      if (!rawStatus) return;
+
+      // Normalize status: "حضور", "حاضر", "تأخير", "غائب", "غياب", "إذن"
+      let finalStatus: "حضور" | "تأخير" | "غائب" | "إذن" = "حضور";
+      if (rawStatus === "حاضر" || rawStatus === "حضور") finalStatus = "حضور";
+      else if (rawStatus === "تأخير") finalStatus = "تأخير";
+      else if (rawStatus === "غائب" || rawStatus === "غياب") finalStatus = "غائب";
+      else if (rawStatus === "إذن") finalStatus = "إذن";
+
+      const official = isOfficialGroupDay(studentGroupDays, dateStr);
+      const isSubstitute = !official && (finalStatus === "حضور" || finalStatus === "تأخير");
+
+      // Timezone-safe Arabic day name calculation
+      const parts = dateStr.split("-").map(Number);
+      let dayName = getArabicDayName(dateStr);
+      if (parts.length === 3) {
+        const safeDate = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
+        const dayNames = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+        dayName = dayNames[safeDate.getDay()];
+      }
+
+      logs.push({
+        date: dateStr,
+        dayName,
+        status: finalStatus,
+        timeRecorded: dateStr === todayKey ? scanLogTimes[activeStudent.barcode] : undefined,
+        isOfficialScheduledDay: official,
+        isSubstituteDay: isSubstitute,
+        note: isSubstitute
+          ? "حضور إضافي / تعويضي (في غير اليوم المعتاد للمجموعة)"
+          : official
+          ? "حصة في اليوم الرسمي للمجموعة"
+          : undefined,
+      });
+    });
+
     return logs;
   }, [activeStudent, attendanceHistory, attendanceToday, scanLogTimes]);
+
+  // Filtered attendance logs based on tab selection
+  const filteredAttendanceLogs = useMemo(() => {
+    if (attendanceFilter === "all") return attendanceScheduleLogs;
+    if (attendanceFilter === "present") return attendanceScheduleLogs.filter((l) => l.status === "حضور");
+    if (attendanceFilter === "absent") return attendanceScheduleLogs.filter((l) => l.status === "غائب");
+    if (attendanceFilter === "substitute") return attendanceScheduleLogs.filter((l) => l.isSubstituteDay || l.status === "تأخير" || l.status === "إذن");
+    return attendanceScheduleLogs;
+  }, [attendanceScheduleLogs, attendanceFilter]);
+
+  // Attendance counts & rates
+  const realAttendanceCount = useMemo(() => {
+    const listCount = attendanceScheduleLogs.filter((l) => l.status === "حضور" || l.status === "تأخير").length;
+    return Math.max(activeStudent.totalAttendanceDays || 0, listCount);
+  }, [attendanceScheduleLogs, activeStudent.totalAttendanceDays]);
+
+  const realAbsentCount = useMemo(() => {
+    const listCount = attendanceScheduleLogs.filter((l) => l.status === "غائب").length;
+    return activeStudent.totalAbsentDays !== undefined ? activeStudent.totalAbsentDays : listCount;
+  }, [attendanceScheduleLogs, activeStudent.totalAbsentDays]);
+
+  const attendanceRate = useMemo(() => {
+    const total = realAttendanceCount + realAbsentCount;
+    if (total === 0) return 100;
+    return Math.round((realAttendanceCount / total) * 100);
+  }, [realAttendanceCount, realAbsentCount]);
+
+  const absenceRate = useMemo(() => {
+    return 100 - attendanceRate;
+  }, [attendanceRate]);
 
   // 5. Exams and Evaluation Scores
   const examHistoryList = useMemo(() => {
@@ -771,7 +920,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                       {attendanceRate}%
                     </div>
                     <p className="text-xs text-slate-400 mt-1">
-                      حضور: <strong className="text-emerald-400">{activeStudent.totalAttendanceDays || 0} يوم</strong> | غياب: <strong className="text-rose-400">{activeStudent.totalAbsentDays || 0} يوم</strong>
+                      حضور: <strong className="text-emerald-400">{realAttendanceCount} يوم</strong> | غياب: <strong className="text-rose-400">{realAbsentCount} يوم</strong>
                     </p>
                   </div>
 
@@ -846,7 +995,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                         غير مدفوع
                       </div>
                       <p className="text-xs text-slate-300">
-                        قيمة الاشتراك الشهري المقررة: <strong className="text-amber-400">{activeStudent.customMonthlyFee || 200} ج.م</strong>
+                        قيمة الاشتراك الشهري المقررة: <strong className="text-amber-400">{standardMonthlyFee} ج.م</strong>
                       </p>
                       <p className="text-[11px] text-slate-400">
                         يرجى السداد مع المساعد أثناء الحصة القادمة لتأكيد الحجز.
@@ -962,7 +1111,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         {activeTab === "attendance" && (
           <div className="space-y-6 animate-fadeIn">
             {/* Header with Group Schedule Rule Banner */}
-            <div className="bg-slate-900/90 border border-amber-500/30 rounded-3xl p-6 shadow-xl space-y-3">
+            <div className="bg-slate-900/90 border border-emerald-500/30 rounded-3xl p-6 shadow-xl space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center">
@@ -973,26 +1122,83 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                       سجل الحضور والغياب المفلتر لجدول الطالب
                     </h2>
                     <p className="text-xs text-slate-400">
-                      مجموعة الطالب: <strong className="text-amber-400">{activeStudent.groupDays}</strong>
+                      مجموعة الطالب المعتمدة: <strong className="text-amber-400">{activeStudent.groupDays}</strong> • الصف: <strong className="text-white">{studentGrade}</strong>
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="px-3 py-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
-                    حضور: {activeStudent.totalAttendanceDays || 0}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-3.5 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    حضور وتأخير: {realAttendanceCount}
                   </span>
-                  <span className="px-3 py-1 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-bold">
-                    غياب: {activeStudent.totalAbsentDays || 0}
+                  <span className="px-3.5 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center gap-1.5">
+                    <XCircle className="w-3.5 h-3.5" />
+                    غياب: {realAbsentCount}
+                  </span>
+                  <span className="px-3.5 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
+                    نسبة الالتزام: {attendanceRate}%
                   </span>
                 </div>
               </div>
 
+              {/* Attendance Filter Tabs */}
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
+                <span className="text-xs text-slate-400 flex items-center gap-1 ml-1">
+                  <Filter className="w-3.5 h-3.5 text-amber-400" />
+                  تصفية السجل:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setAttendanceFilter("all")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    attendanceFilter === "all"
+                      ? "bg-amber-500 text-slate-950 font-black shadow-md"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  جميع الأيام ({attendanceScheduleLogs.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAttendanceFilter("present")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    attendanceFilter === "present"
+                      ? "bg-emerald-500 text-slate-950 font-black shadow-md"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  أيام الحضور ({attendanceScheduleLogs.filter((l) => l.status === "حضور").length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAttendanceFilter("absent")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    attendanceFilter === "absent"
+                      ? "bg-rose-500 text-white font-black shadow-md"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  أيام الغياب ({attendanceScheduleLogs.filter((l) => l.status === "غائب").length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAttendanceFilter("substitute")}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                    attendanceFilter === "substitute"
+                      ? "bg-indigo-500 text-white font-black shadow-md"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  حصص إضافية وتعويضية ({attendanceScheduleLogs.filter((l) => l.isSubstituteDay || l.status === "تأخير" || l.status === "إذن").length})
+                </button>
+              </div>
+
               {/* Schedule explanation banner */}
-              <div className="p-3 rounded-2xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 leading-relaxed flex items-start gap-2">
+              <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 leading-relaxed flex items-start gap-2">
                 <Sparkles className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <span>
-                  <strong>قواعد الجدول المعتمدة:</strong> يتم تصفية السجل آلياً وفقاً لأيام الحضور الرسمية لمجموعة الطالب. وفي حال حضور الطالب في يوم مختلف لتعويض حصة، يتم تمييزه فورياً بوسم <strong>(حضور تعويضي / بديل)</strong> دون الإخلال بجدول مجموعته الرسمي.
+                  <strong>جدول الحضور المعتمد:</strong> يعرض هذا السجل الأيام الموثقة لحضور وغياب الطالب في منظومة الرياضيات. الحصص المقامة في الأيام الرسمية لمجموعة الطالب ({activeStudent.groupDays}) تُميّز بوسم <strong className="text-slate-200">يوم رسمي للمجموعة</strong>، بينما تُميّز الحصص المنعقدة في مواعيد إضافية أو تعويضية بوسم <strong className="text-indigo-400">حضور إضافي / تعويضي</strong>.
                 </span>
               </div>
             </div>
@@ -1003,21 +1209,21 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                 <thead>
                   <tr className="border-b border-slate-800 text-slate-400 font-bold">
                     <th className="py-3 px-3">اليوم والتاريخ</th>
-                    <th className="py-3 px-3">نوع اليوم في الجدول</th>
+                    <th className="py-3 px-3">نوع الحصة في الجدول</th>
                     <th className="py-3 px-3 text-center">حالة الحضور</th>
                     <th className="py-3 px-3">وقت التسجيل</th>
                     <th className="py-3 px-3">ملاحظات والتفاصيل</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-tajawal">
-                  {attendanceScheduleLogs.length === 0 ? (
+                  {filteredAttendanceLogs.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="py-8 text-center text-slate-400">
-                        لا توجد سجلات حضور مسجلة حتى الآن لهذا الطالب.
+                        لا توجد سجلات حضور مطابقة للتصفية المختارة حتى الآن.
                       </td>
                     </tr>
                   ) : (
-                    attendanceScheduleLogs.map((log, idx) => {
+                    filteredAttendanceLogs.map((log, idx) => {
                       const isPresent = log.status === "حضور";
                       const isAbsent = log.status === "غائب";
                       const isDelay = log.status === "تأخير";
@@ -1034,14 +1240,14 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                             {log.isSubstituteDay ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 font-bold text-[11px]">
                                 <RotateCcw className="w-3 h-3" />
-                                حضور تعويضي (عكس أيام)
+                                حضور إضافي / تعويضي
                               </span>
                             ) : log.isOfficialScheduledDay ? (
                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-800 text-slate-300 text-[11px]">
-                                يوم رسمي للمجموعة
+                                حصة في اليوم الرسمي
                               </span>
                             ) : (
-                              <span className="text-slate-500 text-[11px]">يوم خارجي</span>
+                              <span className="text-slate-500 text-[11px]">حصة خاصة / إضافية</span>
                             )}
                           </td>
 
@@ -1080,7 +1286,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                           </td>
 
                           <td className="py-3.5 px-3 text-slate-400 text-[11px]">
-                            {log.note || (isPresent ? "حضر الحصة بانتظام" : isAbsent ? "لم يحضر ولم يقدم عذراً مسبقاً" : "-")}
+                            {log.note || (isPresent ? "حضر الحصة بانتظام" : isAbsent ? "لم يحضر الحصة" : "-")}
                           </td>
                         </tr>
                       );
@@ -1092,92 +1298,455 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
           </div>
         )}
 
-        {/* TAB 3: FINANCIAL LOGS */}
+        {/* TAB 3: FINANCIAL LOGS & COMPLETE ACADEMIC LEDGER */}
         {activeTab === "financials" && (
           <div className="space-y-6 animate-fadeIn">
             {/* Top Financial Status Box */}
-            <div className="bg-slate-900/90 border border-amber-500/30 rounded-3xl p-6 shadow-xl space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center">
-                    <Receipt className="w-6 h-6" />
+            <div className="bg-slate-900/90 border border-amber-500/30 rounded-3xl p-6 shadow-xl space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-13 h-13 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                    <Receipt className="w-7 h-7" />
                   </div>
                   <div>
-                    <h2 className="text-lg font-bold font-fancy text-white">
-                      السجل المالي وإيصالات الاشتراكات الشهرية
+                    <h2 className="text-lg md:text-xl font-bold font-fancy text-white">
+                      السجل المالي وكشف حساب المصروفات
                     </h2>
-                    <p className="text-xs text-slate-400">
-                      قيمة الاشتراك الشهري المعتمدة للطالب: <strong className="text-amber-400">{activeStudent.customMonthlyFee || 200} ج.م</strong>
-                    </p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <span className="text-xs text-slate-300">
+                        قيمة الاشتراك الشهري المعتمدة للطالب:{" "}
+                        <strong className="text-amber-400 font-black text-sm">{standardMonthlyFee} ج.م</strong>
+                      </span>
+                      {activeStudent.customMonthlyFee ? (
+                        <span className="px-2 py-0.5 rounded-lg bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-[11px] font-bold">
+                          اشتراك مخصص معتمد
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-lg bg-slate-800 text-slate-400 text-[11px]">
+                          السعر الرسمي للصف ({studentGrade})
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                <div className="p-3 rounded-2xl bg-slate-950/80 border border-slate-800 text-center">
-                  <span className="text-[11px] text-slate-400 block mb-0.5">حالة الشهر الحالي ({currentMonthKey})</span>
+                <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800 text-center min-w-[190px]">
+                  <span className="text-[11px] text-slate-400 block mb-0.5">حالة شهر ({currentMonthKey})</span>
                   {currentMonthPayment ? (
-                    <span className="text-xs font-bold text-emerald-400 flex items-center justify-center gap-1">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      تم السداد ({currentMonthPayment.amount} ج.م)
+                    <span className="text-xs font-bold text-emerald-400 flex items-center justify-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      تم السداد بنجاح ({currentMonthPayment.amount} ج.م)
                     </span>
                   ) : (
-                    <span className="text-xs font-bold text-rose-400 flex items-center justify-center gap-1">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      غير مسدد حتى الآن
+                    <span className="text-xs font-bold text-rose-400 flex items-center justify-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-rose-400" />
+                      مستحق السداد حتى الآن
                     </span>
                   )}
                 </div>
               </div>
+
+              {/* 4 Financial Summary Stat Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">قيمة الاشتراك الأصلي</span>
+                  <div className="text-base md:text-lg font-black font-mono text-amber-400 mt-1">
+                    {standardMonthlyFee} <span className="text-xs font-normal text-slate-400">ج.م/شهر</span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">إجمالي المسدد فعلياً</span>
+                  <div className="text-base md:text-lg font-black font-mono text-emerald-400 mt-1">
+                    {totalPaidAnnual} <span className="text-xs font-normal text-slate-400">ج.م ({paidMonthsCount} شهور)</span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">الشهور المسددة</span>
+                  <div className="text-base md:text-lg font-black font-mono text-indigo-300 mt-1">
+                    {paidMonthsCount} <span className="text-xs font-normal text-slate-400">من أصل {academicMonths.length} شهور</span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-slate-800">
+                  <span className="text-[11px] text-slate-400 block">المتأخرات حتى الشهر الحالي</span>
+                  <div className={`text-base md:text-lg font-black font-mono mt-1 ${unpaidMonthsPastCurrent > 0 ? "text-rose-400" : "text-emerald-400"}`}>
+                    {totalOverdueAmount} <span className="text-xs font-normal text-slate-400">ج.م ({unpaidMonthsPastCurrent} شهور)</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sub-Tab Switcher: Full Academic Ledger vs Receipts List */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800/80">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveFinancialSubTab("ledger")}
+                    className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      activeFinancialSubTab === "ledger"
+                        ? "bg-amber-500 text-slate-950 font-black shadow-md"
+                        : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                    }`}
+                  >
+                    <CalendarDays className="w-4 h-4" />
+                    <span>السجل المالي السنوي الكامل (كشف الحساب)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveFinancialSubTab("receipts")}
+                    className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      activeFinancialSubTab === "receipts"
+                        ? "bg-emerald-500 text-slate-950 font-black shadow-md"
+                        : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                    }`}
+                  >
+                    <Receipt className="w-4 h-4" />
+                    <span>إيصالات السداد الموثقة ({paymentHistoryList.length})</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    printElement("parent-portal-full-ledger-table-print", {
+                      title: `كشف حساب ومصروفات الطالب - ${activeStudent.name}`,
+                    });
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs flex items-center gap-1.5 border border-slate-700 cursor-pointer transition shadow"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>طباعة كشف الحساب</span>
+                </button>
+              </div>
             </div>
 
-            {/* Payments List Table */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto">
-              <table className="w-full text-right text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 text-slate-400 font-bold">
-                    <th className="py-3 px-3">الشهر المستحق</th>
-                    <th className="py-3 px-3">المبلغ المسدد</th>
-                    <th className="py-3 px-3">تاريخ الدفع</th>
-                    <th className="py-3 px-3">وقت الإيصال</th>
-                    <th className="py-3 px-3">البيان والملاحظات</th>
-                    <th className="py-3 px-3 text-center">الحالة</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 font-tajawal">
-                  {paymentHistoryList.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400">
-                        لا توجد إيصالات أو دفعات مسجلة لهذا الطالب بعد.
-                      </td>
+            {/* SUB-VIEW 1: FULL ACADEMIC LEDGER (ALL MONTHS) */}
+            {activeFinancialSubTab === "ledger" && (
+              <div
+                id="parent-portal-full-ledger-table-print"
+                className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto space-y-4"
+              >
+                <div className="flex items-center justify-between gap-3 pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-amber-400" />
+                    <h3 className="text-sm md:text-base font-bold text-white">
+                      كشف الحساب المالي لشهور العام الدراسي كاملة
+                    </h3>
+                  </div>
+                  <span className="text-xs text-slate-400 font-mono">
+                    الاشتراك المعتمد: {standardMonthlyFee} ج.م / شهر
+                  </span>
+                </div>
+
+                <table className="w-full text-right text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-bold">
+                      <th className="py-3 px-3">الشهر والسنة الدراسية</th>
+                      <th className="py-3 px-3">القيمة المعتمدة</th>
+                      <th className="py-3 px-3">المبلغ المسدد</th>
+                      <th className="py-3 px-3 text-center">حالة السداد</th>
+                      <th className="py-3 px-3">تاريخ ووقت السداد</th>
+                      <th className="py-3 px-3 text-center">إيصال السداد</th>
                     </tr>
-                  ) : (
-                    paymentHistoryList.map((pay, idx) => (
-                      <tr key={idx} className="hover:bg-slate-800/40 transition">
-                        <td className="py-3.5 px-3 font-mono font-bold text-amber-300 text-sm">
-                          {pay.month || pay.monthKey}
-                        </td>
-                        <td className="py-3.5 px-3 font-mono font-extrabold text-emerald-400 text-sm">
-                          {pay.amount} ج.م
-                        </td>
-                        <td className="py-3.5 px-3 font-mono text-slate-300">
-                          {pay.date || "-"}
-                        </td>
-                        <td className="py-3.5 px-3 font-mono text-slate-400 text-[11px]">
-                          {pay.time || "-"}
-                        </td>
-                        <td className="py-3.5 px-3 text-slate-300 text-xs">
-                          {pay.note || "اشتراك شهري"}
-                        </td>
-                        <td className="py-3.5 px-3 text-center">
-                          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 font-bold text-xs">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            مدفوع وموثق
-                          </span>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 font-tajawal">
+                    {ledgerEntries.map((entry, idx) => {
+                      const isCurrent = entry.monthKey === currentMonthKey;
+                      const isFuture = entry.monthKey > currentMonthKey;
+
+                      return (
+                        <tr
+                          key={idx}
+                          className={`hover:bg-slate-800/40 transition ${
+                            isCurrent ? "bg-amber-500/5 font-semibold" : ""
+                          }`}
+                        >
+                          <td className="py-3.5 px-3">
+                            <div className="font-bold text-white text-sm flex items-center gap-2">
+                              <span>{entry.monthLabel}</span>
+                              {isCurrent && (
+                                <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 text-[10px] font-bold">
+                                  الشهر الحالي
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-400 font-mono">{entry.monthKey}</div>
+                          </td>
+
+                          <td className="py-3.5 px-3 font-mono font-bold text-slate-200 text-sm">
+                            {entry.requiredAmount} ج.م
+                          </td>
+
+                          <td className="py-3.5 px-3 font-mono font-extrabold text-sm">
+                            {entry.isPaid ? (
+                              <span className="text-emerald-400">{entry.paidAmount} ج.م</span>
+                            ) : (
+                              <span className="text-slate-500">0 ج.م</span>
+                            )}
+                          </td>
+
+                          <td className="py-3.5 px-3 text-center">
+                            {entry.isPaid ? (
+                              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 font-bold text-xs">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                مدفوع وموثق
+                              </span>
+                            ) : isFuture ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-800 text-slate-400 text-xs">
+                                مستحق قادم
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-400 font-bold text-xs">
+                                <AlertTriangle className="w-3.5 h-3.5" />
+                                غير مسدد (مستحق)
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="py-3.5 px-3 font-mono text-slate-300">
+                            {entry.payRecord ? (
+                              <div>
+                                <span>{entry.payRecord.date || "-"}</span>
+                                {entry.payRecord.time && (
+                                  <span className="text-[11px] text-slate-400 block">{entry.payRecord.time}</span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-slate-600">-</span>
+                            )}
+                          </td>
+
+                          <td className="py-3.5 px-3 text-center">
+                            {entry.isPaid && entry.payRecord ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedReceiptForModal({
+                                    monthLabel: entry.monthLabel,
+                                    monthKey: entry.monthKey,
+                                    payRecord: entry.payRecord!,
+                                  })
+                                }
+                                className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>معاينة الإيصال</span>
+                              </button>
+                            ) : (
+                              <span className="text-slate-600 text-xs">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* SUB-VIEW 2: VERIFIED RECEIPTS LIST */}
+            {activeFinancialSubTab === "receipts" && (
+              <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto space-y-4">
+                <div className="flex items-center justify-between gap-3 pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <Receipt className="w-5 h-5 text-emerald-400" />
+                    <h3 className="text-sm md:text-base font-bold text-white">
+                      إيصالات السداد الموثقة لدى الإدارة ({paymentHistoryList.length})
+                    </h3>
+                  </div>
+                </div>
+
+                <table className="w-full text-right text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-bold">
+                      <th className="py-3 px-3">الشهر المستحق</th>
+                      <th className="py-3 px-3">المبلغ المسدد</th>
+                      <th className="py-3 px-3">تاريخ الدفع</th>
+                      <th className="py-3 px-3">وقت الإيصال</th>
+                      <th className="py-3 px-3">البيان والملاحظات</th>
+                      <th className="py-3 px-3 text-center">الحالة</th>
+                      <th className="py-3 px-3 text-center">الإيصال المعتمد</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 font-tajawal">
+                    {paymentHistoryList.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-8 text-center text-slate-400">
+                          لا توجد إيصالات أو دفعات مسجلة لهذا الطالب حتى الآن.
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      paymentHistoryList.map((pay, idx) => (
+                        <tr key={idx} className="hover:bg-slate-800/40 transition">
+                          <td className="py-3.5 px-3 font-mono font-bold text-amber-300 text-sm">
+                            {pay.month || pay.monthKey}
+                          </td>
+                          <td className="py-3.5 px-3 font-mono font-extrabold text-emerald-400 text-sm">
+                            {pay.amount} ج.م
+                          </td>
+                          <td className="py-3.5 px-3 font-mono text-slate-300">
+                            {pay.date || "-"}
+                          </td>
+                          <td className="py-3.5 px-3 font-mono text-slate-400 text-[11px]">
+                            {pay.time || "-"}
+                          </td>
+                          <td className="py-3.5 px-3 text-slate-300 text-xs">
+                            {pay.note || "اشتراك شهري"}
+                          </td>
+                          <td className="py-3.5 px-3 text-center">
+                            <span className="inline-flex items-center gap-1 px-3 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 font-bold text-xs">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              مدفوع وموثق
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedReceiptForModal({
+                                  monthLabel: pay.month || pay.monthKey || "اشتراك شهري",
+                                  monthKey: pay.monthKey || pay.month || "",
+                                  payRecord: pay,
+                                })
+                              }
+                              className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 font-bold text-xs inline-flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>معاينة وطباعة</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* PRINTABLE / VIEWABLE OFFICIAL RECEIPT MODAL */}
+        {selectedReceiptForModal && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 overflow-y-auto no-print-backdrop">
+            <div className="bg-[#0b1224] border-2 border-emerald-500/40 w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 font-tajawal text-slate-100">
+              {/* Modal Top Bar */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                  <Receipt className="w-5 h-5" />
+                  <span>معاينة إيصال السداد المعتمد</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedReceiptForModal(null)}
+                  className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Printable Receipt Card */}
+              <div
+                id="parent-portal-official-receipt-print"
+                className="bg-white text-slate-900 p-6 rounded-2xl shadow-md border border-slate-300 space-y-4 print-container"
+              >
+                {/* Header */}
+                <div className="text-center pb-3 border-b-2 border-emerald-700">
+                  <h2 className="text-base font-black text-emerald-900">
+                    منظومة الأستاذة إيمان الدمشيتي - مادة الرياضيات
+                  </h2>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    إيصال سداد اشتراك شهري معتمد وموثق 🧾
+                  </p>
+                </div>
+
+                {/* Receipt Details Grid */}
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <span className="text-slate-500 block">اسم الطالب:</span>
+                    <strong className="text-slate-900 text-sm">{activeStudent.name}</strong>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 block">كود الباركود:</span>
+                    <strong className="text-slate-900 font-mono text-sm">#{activeStudent.barcode}</strong>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 block">الصف الدراسي:</span>
+                    <strong className="text-slate-800">{studentGrade}</strong>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 block">المجموعة المعتمدة:</span>
+                    <strong className="text-slate-800">{activeStudent.groupDays}</strong>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 block">عن شهر:</span>
+                    <strong className="text-emerald-800 text-sm font-mono">
+                      {selectedReceiptForModal.monthLabel}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span className="text-slate-500 block">تاريخ السداد:</span>
+                    <strong className="text-slate-800 font-mono">
+                      {selectedReceiptForModal.payRecord.date || "مسجل"}
+                    </strong>
+                  </div>
+                </div>
+
+                {/* Amount Box */}
+                <div className="p-4 rounded-xl bg-emerald-50 border-2 border-emerald-500 text-center my-3">
+                  <span className="text-xs text-emerald-800 block font-bold">المبلغ المسدد نقداً</span>
+                  <div className="text-2xl font-black text-emerald-900 font-mono mt-1">
+                    {selectedReceiptForModal.payRecord.amount} ج.م
+                  </div>
+                  <span className="text-[11px] text-emerald-700 block mt-0.5">
+                    (فقط وقدره {selectedReceiptForModal.payRecord.amount} جنيهاً مصرياً لا غير)
+                  </span>
+                </div>
+
+                {/* Footer Notes & Seal */}
+                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
+                  <div>
+                    <span>توقيت القيد: {selectedReceiptForModal.payRecord.time || "معتمد"}</span>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      البيان: {selectedReceiptForModal.payRecord.note || "اشتراك شهري"}
+                    </div>
+                  </div>
+                  <div className="text-left font-bold text-emerald-900">
+                    <div>إدارة منظومة الرياضيات</div>
+                    <div className="text-[10px] text-emerald-700">أ/ إيمان الدمشيتي ✨</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    printElement("parent-portal-official-receipt-print", {
+                      title: `إيصال سداد - ${activeStudent.name} - ${selectedReceiptForModal.monthLabel}`,
+                    });
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition shadow cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>طباعة الإيصال الرسمي</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedReceiptForModal(null)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition cursor-pointer"
+                >
+                  إغلاق
+                </button>
+              </div>
             </div>
           </div>
         )}

@@ -1153,6 +1153,7 @@ export default function App() {
           attendanceHistory={attendanceHistory}
           payments={payments}
           scanLogTimes={scanLogTimes}
+          groupPrices={groupPrices}
         />
       </div>
     );
