@@ -3,7 +3,7 @@ import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
 import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName, getGroupForDate, isOfficialGroupDay } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAttendanceHistoryToExcel } from "../utils/excel";
-import { Calendar, Filter, FileSpreadsheet, FileText, CheckCircle2, AlertTriangle, XCircle, Edit3, Search, X } from "lucide-react";
+import { Calendar, Filter, FileSpreadsheet, FileText, CheckCircle2, AlertTriangle, XCircle, Edit3, Search, X, Trash2 } from "lucide-react";
 
 interface DailyAttendanceReportProps {
   students: Student[];
@@ -77,7 +77,8 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const handleSaveStatus = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingStudent) return;
-    onUpdateStatus(editingStudent.barcode, selectedDate, newStatusSelect);
+    const finalStatus = newStatusSelect === "مسح" ? "" : newStatusSelect;
+    onUpdateStatus(editingStudent.barcode, selectedDate, finalStatus);
     setEditingStudent(null);
   };
 
@@ -298,23 +299,41 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                   <option value="تأخير">🟡 تأخير</option>
                   <option value="غائب">🔴 غائب</option>
                   <option value="إذن">⚪ إذن مسبق / عذر</option>
+                  <option value="مسح">🗑️ مسح وإلغاء تسجيل هذا اليوم بالكامل</option>
                 </select>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="flex items-center justify-between gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setEditingStudent(null)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700"
+                  onClick={() => {
+                    if (editingStudent) {
+                      onUpdateStatus(editingStudent.barcode, selectedDate, "");
+                      setEditingStudent(null);
+                    }
+                  }}
+                  className="px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all active:scale-95"
+                  title="مسح تسجيل حضور هذا اليوم"
                 >
-                  إلغاء
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>مسح السجل</span>
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black text-xs font-black shadow-md"
-                >
-                  تحديث وحفظ الحالة
-                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingStudent(null)}
+                    className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700 cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black text-xs font-black shadow-md cursor-pointer transition-all active:scale-95"
+                  >
+                    تحديث وحفظ الحالة
+                  </button>
+                </div>
               </div>
             </form>
           </div>

@@ -49,6 +49,7 @@ export interface Student {
   lastExamScore?: string;
   notes?: string;
   createdAt?: string;
+  updatedAt?: number;
 }
 
 export type AttendanceStatus = "حضور" | "تأخير" | "غائب" | "إذن";

@@ -46,14 +46,21 @@ import {
   broadcastGroupFinished,
   broadcastPaymentChange,
   broadcastStudentChange,
+  broadcastAttendanceStatusChange,
+  broadcastGradeChange,
+  broadcastSessionCleared,
   subscribeToGroupFinished,
   subscribeToPaymentChanges,
   subscribeToStudentChanges,
+  subscribeToAttendanceStatusChanges,
+  subscribeToGradeChanges,
+  subscribeToSessionCleared,
   saveBulkAttendanceToSupabase,
   savePaymentToSupabase,
   deletePaymentFromSupabase,
   saveStudentToSupabase,
   deleteStudentFromSupabase,
+  deleteAttendanceFromSupabase,
 } from "./utils/supabaseClient";
 import { Navbar } from "./components/Navbar";
 import { Sidebar } from "./components/Sidebar";
@@ -407,22 +414,38 @@ export default function App() {
     });
 
     const unsubPayment = subscribeToPaymentChanges((payload) => {
-      setSyncBanner({
-        show: true,
-        type: "online-synced",
-        message: `⚡ تحديث مالي فوري: تم تسجيل سداد شهر (${payload.monthKey}) للطالب (${payload.barcode})!`,
-      });
-      setTimeout(() => setSyncBanner(null), 4000);
+      if (payload.action === "delete") {
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ إلغاء مالي فوري: تم إلغاء سداد شهر (${payload.monthKey}) للطالب (${payload.barcode})!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
 
-      setPayments((prev) => {
-        const updated = { ...prev };
-        if (payload.action === "delete") {
+        setPayments((prev) => {
+          const updated = { ...prev };
           if (updated[payload.monthKey]) {
             const m = { ...updated[payload.monthKey] };
             delete m[payload.barcode];
-            updated[payload.monthKey] = m;
+            if (Object.keys(m).length === 0) {
+              delete updated[payload.monthKey];
+            } else {
+              updated[payload.monthKey] = m;
+            }
           }
-        } else {
+          savePaymentsData(updated, `${payload.monthKey}:${payload.barcode}`);
+          return updated;
+        });
+      } else {
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ تحديث مالي فوري: تم تسجيل سداد شهر (${payload.monthKey}) للطالب (${payload.barcode})!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+
+        setPayments((prev) => {
+          const updated = { ...prev };
           const m = { ...(updated[payload.monthKey] || {}) };
           m[payload.barcode] = {
             barcode: payload.barcode,
@@ -435,9 +458,10 @@ export default function App() {
             recordedBy: payload.recordedBy,
           };
           updated[payload.monthKey] = m;
-        }
-        return updated;
-      });
+          savePaymentsData(updated);
+          return updated;
+        });
+      }
     });
 
     const unsubStudent = subscribeToStudentChanges((payload) => {
@@ -455,10 +479,152 @@ export default function App() {
       }
     });
 
+    const unsubAttendanceStatus = subscribeToAttendanceStatusChanges((payload) => {
+      const todayKey = getTodayKey();
+      const isToday = payload.dateKey === todayKey;
+      const isDeletion = payload.action === "delete" || !payload.status || payload.status === "لم يسجل";
+
+      if (isDeletion) {
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ مزامنة فورية: تم مسح وإلغاء تسجيل حضور (${payload.barcode}) لتاريخ ${payload.dateKey}`,
+        });
+        setTimeout(() => setSyncBanner(null), 3500);
+
+        setAttendanceHistory((prev) => {
+          const next = { ...prev };
+          if (next[payload.dateKey]) {
+            const dayMap = { ...next[payload.dateKey] };
+            delete dayMap[payload.barcode];
+            next[payload.dateKey] = dayMap;
+          }
+          return next;
+        });
+
+        if (isToday) {
+          setAttendanceToday((prev) => {
+            const next = { ...prev };
+            delete next[payload.barcode];
+            return next;
+          });
+          setScanLogOrder((prev) => prev.filter((b) => b !== payload.barcode));
+          setScanLogTimes((prev) => {
+            const next = { ...prev };
+            delete next[payload.barcode];
+            return next;
+          });
+        }
+      } else {
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ مزامنة فورية: تم تحديث حضور (${payload.barcode}) إلى [${payload.status}] لتاريخ ${payload.dateKey}`,
+        });
+        setTimeout(() => setSyncBanner(null), 3500);
+
+        setAttendanceHistory((prev) => {
+          const next = { ...prev };
+          const dayMap = { ...(next[payload.dateKey] || {}) };
+          dayMap[payload.barcode] = payload.status;
+          next[payload.dateKey] = dayMap;
+          return next;
+        });
+
+        if (isToday) {
+          setAttendanceToday((prev) => ({ ...prev, [payload.barcode]: payload.status }));
+        }
+      }
+    });
+
+    const unsubGrade = subscribeToGradeChanges((payload) => {
+      if (payload.action === "delete" || payload.action === "clear") {
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ مزامنة فورية: تم مسح درجة الطالب (${payload.barcode}) وتحديث كافة الأجهزة!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+
+        setStudents((prev) =>
+          prev.map((s) => {
+            if (s.barcode === payload.barcode) {
+              return {
+                ...s,
+                lastExamTitle: "",
+                lastExamScore: "",
+                totalExamScores: payload.updatedScores || payload.totalExamScores || s.totalExamScores,
+                updatedAt: payload.timestamp || Date.now(),
+              };
+            }
+            return s;
+          })
+        );
+      } else {
+        const displayScore = payload.scoreString || payload.scoreFormatted || "";
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `⚡ مزامنة فورية للامتحان: تم رصد درجة (${payload.barcode}): ${displayScore}`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+
+        setStudents((prev) =>
+          prev.map((s) => {
+            if (s.barcode === payload.barcode) {
+              return {
+                ...s,
+                lastExamTitle: payload.examTitle || s.lastExamTitle,
+                lastExamScore: displayScore || s.lastExamScore,
+                points: payload.points !== undefined ? payload.points : s.points,
+                totalExamScores: payload.updatedScores || payload.totalExamScores || s.totalExamScores,
+                updatedAt: payload.timestamp || Date.now(),
+              };
+            }
+            return s;
+          })
+        );
+      }
+    });
+
+    const unsubSessionCleared = subscribeToSessionCleared((payload) => {
+      setSyncBanner({
+        show: true,
+        type: "online-synced",
+        message: `⚡ تم تفريغ شاشة التحضير لـ [${payload.grade}] بواسطة (${payload.clearedBy})`,
+      });
+      setTimeout(() => setSyncBanner(null), 4000);
+
+      const studentGradeMap = new Map<string, string>();
+      students.forEach((s) => s.barcode && studentGradeMap.set(String(s.barcode).trim(), s.groupGrade));
+
+      setScanLogOrder((prev) => prev.filter((b) => studentGradeMap.get(String(b).trim()) !== payload.grade));
+      setScanLogTimes((prev) => {
+        const next = { ...prev };
+        students.forEach((s) => {
+          if (s.groupGrade === payload.grade) delete next[String(s.barcode).trim()];
+        });
+        return next;
+      });
+
+      if (payload.resetTodayAttendance) {
+        setAttendanceToday((prev) => {
+          const next = { ...prev };
+          students.forEach((s) => {
+            if (s.groupGrade === payload.grade) delete next[String(s.barcode).trim()];
+          });
+          return next;
+        });
+      }
+    });
+
     return () => {
       unsubGroup();
       unsubPayment();
       unsubStudent();
+      unsubAttendanceStatus();
+      unsubGrade();
+      unsubSessionCleared();
     };
   }, [students]);
 
@@ -649,16 +815,70 @@ export default function App() {
     saveBulkAttendanceToSupabase(bulkAttendanceRecords).catch(console.warn);
   }, [students, attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, currentUser]);
 
-  // Handler: Remove single student from active scanner screen
+  // Handler: Remove single student from active scanner screen & undo their attendance if scanned by mistake
   const handleRemoveFromScanner = useCallback((barcode: string) => {
     const updatedOrder = scanLogOrder.filter((b) => b !== barcode);
     const updatedTimes = { ...scanLogTimes };
     delete updatedTimes[barcode];
 
+    const todayKey = getTodayKey();
+    const prevStatus = attendanceToday[barcode];
+
+    const updatedToday = { ...attendanceToday };
+    delete updatedToday[barcode];
+
+    const updatedHistory = { ...attendanceHistory };
+    if (updatedHistory[todayKey]) {
+      const dayMap = { ...updatedHistory[todayKey] };
+      delete dayMap[barcode];
+      updatedHistory[todayKey] = dayMap;
+    }
+
+    const updatedStudents = students.map((s) => {
+      if (s.barcode === barcode && prevStatus) {
+        return {
+          ...s,
+          totalAttendanceDays: (prevStatus === "حضور" || prevStatus === "تأخير")
+            ? Math.max(0, (s.totalAttendanceDays || 0) - 1)
+            : (s.totalAttendanceDays || 0),
+          totalAbsentDays: prevStatus === "غائب"
+            ? Math.max(0, (s.totalAbsentDays || 0) - 1)
+            : (s.totalAbsentDays || 0),
+          updatedAt: Date.now(),
+        };
+      }
+      return s;
+    });
+
     setScanLogOrder(updatedOrder);
     setScanLogTimes(updatedTimes);
-    saveScanLogData(updatedOrder, updatedTimes);
-  }, [scanLogOrder, scanLogTimes]);
+    setAttendanceToday(updatedToday);
+    setAttendanceHistory(updatedHistory);
+    setStudents(updatedStudents);
+
+    saveAttendanceAndStudentsBatch(
+      updatedToday,
+      updatedOrder,
+      updatedTimes,
+      updatedStudents,
+      true,
+      false,
+      `${todayKey}:${barcode}`
+    );
+
+    // Broadcast attendance removal to all devices
+    broadcastAttendanceStatusChange({
+      action: "delete",
+      barcode,
+      dateKey: todayKey,
+      previousStatus: prevStatus,
+      status: "",
+      changedBy: currentUser?.username || "الماسح",
+      timestamp: Date.now(),
+    }).catch(console.warn);
+
+    deleteAttendanceFromSupabase(barcode, todayKey).catch(console.warn);
+  }, [scanLogOrder, scanLogTimes, attendanceToday, attendanceHistory, students, currentUser]);
 
   // Handler: Clear current session scans for a grade with full isolation from previous classes
   const handleClearSessionScans = useCallback((grade: GradeName, resetTodayAttendance = false) => {
@@ -673,7 +893,14 @@ export default function App() {
       const todayKey = getTodayKey();
       setAttendanceHistory((prev) => ({ ...prev, [todayKey]: updatedToday }));
     }
-  }, []);
+
+    broadcastSessionCleared({
+      grade,
+      resetTodayAttendance,
+      clearedBy: currentUser?.username || "الماسح",
+      timestamp: Date.now(),
+    }).catch(console.warn);
+  }, [currentUser]);
 
   // Handler: Add Single Student
   const handleAddStudent = useCallback((newStudent: Student, cardFee = 0) => {
@@ -799,23 +1026,40 @@ export default function App() {
     alert("تم مسح كافة البيانات بنجاح وتحديث السحابة.");
   }, []);
 
-  // Handler: Manual Status Change in Attendance Report or Scanner
+  // Handler: Manual Status Change in Attendance Report or Scanner (supports updates and full deletions)
   const handleChangeAttendanceStatus = useCallback((barcode: string, dateKey: string, newStatus: string) => {
     const todayKey = getTodayKey();
     const isToday = dateKey === todayKey;
-    
+    const isDeletion = !newStatus || newStatus === "مسح" || newStatus.trim() === "";
+
     const prevStatus = isToday ? attendanceToday[barcode] : (attendanceHistory[dateKey]?.[barcode]);
     if (prevStatus === newStatus) return;
 
-    const dateMap = attendanceHistory[dateKey] || {};
-    const updatedDateMap = { ...dateMap, [barcode]: newStatus };
-    const updatedHistory = { ...attendanceHistory, [dateKey]: updatedDateMap };
-
+    const dateMap = { ...(attendanceHistory[dateKey] || {}) };
+    if (isDeletion) {
+      delete dateMap[barcode];
+    } else {
+      dateMap[barcode] = newStatus;
+    }
+    const updatedHistory = { ...attendanceHistory, [dateKey]: dateMap };
     setAttendanceHistory(updatedHistory);
 
     let updatedToday = attendanceToday;
+    let updatedOrder = scanLogOrder;
+    let updatedTimes = scanLogTimes;
+
     if (isToday) {
-      updatedToday = { ...attendanceToday, [barcode]: newStatus };
+      updatedToday = { ...attendanceToday };
+      if (isDeletion) {
+        delete updatedToday[barcode];
+        updatedOrder = scanLogOrder.filter((b) => b !== barcode);
+        updatedTimes = { ...scanLogTimes };
+        delete updatedTimes[barcode];
+        setScanLogOrder(updatedOrder);
+        setScanLogTimes(updatedTimes);
+      } else {
+        updatedToday[barcode] = newStatus;
+      }
       setAttendanceToday(updatedToday);
     }
 
@@ -831,17 +1075,20 @@ export default function App() {
           absCount = Math.max(0, absCount - 1);
         }
 
-        // Apply new status count
-        if (newStatus === "حضور" || newStatus === "تأخير") {
-          attCount += 1;
-        } else if (newStatus === "غائب") {
-          absCount += 1;
+        // Apply new status count if not deleting
+        if (!isDeletion) {
+          if (newStatus === "حضور" || newStatus === "تأخير") {
+            attCount += 1;
+          } else if (newStatus === "غائب") {
+            absCount += 1;
+          }
         }
 
         return {
           ...s,
           totalAttendanceDays: attCount,
           totalAbsentDays: absCount,
+          updatedAt: Date.now(),
         };
       }
       return s;
@@ -849,13 +1096,38 @@ export default function App() {
 
     setStudents(updatedStudents);
 
+    const deletedAttendanceKey = isDeletion ? `${dateKey}:${barcode}` : undefined;
+
     // Save and sync atomically for both today and historical date changes
     if (isToday) {
-      saveAttendanceAndStudentsBatch(updatedToday, scanLogOrder, scanLogTimes, updatedStudents, true);
+      saveAttendanceAndStudentsBatch(
+        updatedToday,
+        updatedOrder,
+        updatedTimes,
+        updatedStudents,
+        true,
+        false,
+        deletedAttendanceKey
+      );
     } else {
-      saveAttendanceHistoryData(updatedHistory, updatedStudents);
+      saveAttendanceHistoryData(updatedHistory, updatedStudents, deletedAttendanceKey);
     }
-  }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students]);
+
+    // ⚡ Supabase Realtime Hub: Broadcast status change/deletion across all connected devices
+    broadcastAttendanceStatusChange({
+      action: isDeletion ? "delete" : "update",
+      barcode,
+      dateKey,
+      previousStatus: prevStatus,
+      status: isDeletion ? "" : newStatus,
+      changedBy: currentUser?.username || "الماسح",
+      timestamp: Date.now(),
+    }).catch(console.warn);
+
+    if (isDeletion) {
+      deleteAttendanceFromSupabase(barcode, dateKey).catch(console.warn);
+    }
+  }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students, currentUser]);
 
   // Handler: Record Payment
   const handleRecordPayment = useCallback((
@@ -946,7 +1218,11 @@ export default function App() {
     if (updatedPayments[oldMonthKey]) {
       const oldMonthMap = { ...updatedPayments[oldMonthKey] };
       delete oldMonthMap[barcode];
-      updatedPayments[oldMonthKey] = oldMonthMap;
+      if (Object.keys(oldMonthMap).length === 0) {
+        delete updatedPayments[oldMonthKey];
+      } else {
+        updatedPayments[oldMonthKey] = oldMonthMap;
+      }
     }
 
     // Add to new month
@@ -965,7 +1241,23 @@ export default function App() {
     updatedPayments[newMonthKey] = newMonthMap;
 
     setPayments(updatedPayments);
-    savePaymentsData(updatedPayments);
+    savePaymentsData(updatedPayments, oldMonthKey !== newMonthKey ? `${oldMonthKey}:${barcode}` : undefined);
+
+    // If month changed, broadcast deletion of old month to other instances
+    if (oldMonthKey !== newMonthKey) {
+      broadcastPaymentChange({
+        action: "delete",
+        barcode,
+        monthKey: oldMonthKey,
+        amount: 0,
+        date: "",
+        time: "",
+        note: "",
+        recordedBy: "",
+        timestamp: Date.now(),
+      }).catch(console.warn);
+      deletePaymentFromSupabase(barcode, oldMonthKey).catch(console.warn);
+    }
 
     // ⚡ Supabase Realtime: Broadcast payment update to all devices in <20ms
     broadcastPaymentChange({
@@ -997,10 +1289,14 @@ export default function App() {
     const updatedPayments = { ...payments };
     const monthMap = { ...updatedPayments[monthKey] };
     delete monthMap[barcode];
-    updatedPayments[monthKey] = monthMap;
+    if (Object.keys(monthMap).length === 0) {
+      delete updatedPayments[monthKey];
+    } else {
+      updatedPayments[monthKey] = monthMap;
+    }
 
     setPayments(updatedPayments);
-    savePaymentsData(updatedPayments);
+    savePaymentsData(updatedPayments, `${monthKey}:${barcode}`);
 
     // ⚡ Supabase Realtime: Broadcast payment deletion
     broadcastPaymentChange({
@@ -1039,6 +1335,7 @@ export default function App() {
           lastExamScore: scoreFormatted,
           totalExamScores: scores,
           points: (s.points || 0) + pointsBonus,
+          updatedAt: Date.now(),
         };
       }
       return s;
@@ -1046,6 +1343,24 @@ export default function App() {
 
     setStudents(updated);
     saveStudentsData(updated);
+
+    const updatedStudent = updated.find((s) => s.barcode === barcode);
+    if (updatedStudent) {
+      saveStudentToSupabase(updatedStudent).catch(console.warn);
+    }
+
+    // ⚡ Supabase Realtime Hub: Broadcast Grade to all devices
+    broadcastGradeChange({
+      action: "record",
+      barcode,
+      examTitle,
+      score,
+      maxScore,
+      scoreString: scoreFormatted,
+      points: updatedStudent?.points,
+      updatedScores: updatedStudent?.totalExamScores,
+      timestamp: Date.now(),
+    }).catch(console.warn);
 
     // 🔔 Native Background Web Push: Delivers to parent phone even if app is closed
     const studentObj = students.find((s) => s.barcode === barcode);
@@ -1077,13 +1392,61 @@ export default function App() {
           lastExamScore: lastScore,
           points: newPoints,
           totalExamScores: updatedScores,
+          updatedAt: Date.now(),
         };
       }
       return s;
     });
     setStudents(updated);
     saveStudentsData(updated);
+
+    const updatedStudent = updated.find((s) => s.barcode === barcode);
+    if (updatedStudent) {
+      saveStudentToSupabase(updatedStudent).catch(console.warn);
+    }
+
+    broadcastGradeChange({
+      action: "update",
+      barcode,
+      examTitle: lastTitle,
+      scoreString: lastScore,
+      points: newPoints,
+      updatedScores,
+      timestamp: Date.now(),
+    }).catch(console.warn);
   };
+
+  // Handler: Clear / Delete Student Grade Completely
+  const handleClearGrade = useCallback((barcode: string) => {
+    const updated = students.map((s) => {
+      if (s.barcode === barcode) {
+        return {
+          ...s,
+          lastExamTitle: "",
+          lastExamScore: "",
+          updatedAt: Date.now(),
+        };
+      }
+      return s;
+    });
+
+    setStudents(updated);
+    saveStudentsData(updated);
+
+    const updatedStudent = updated.find((s) => s.barcode === barcode);
+    if (updatedStudent) {
+      saveStudentToSupabase(updatedStudent).catch(console.warn);
+    }
+
+    broadcastGradeChange({
+      action: "delete",
+      barcode,
+      examTitle: "",
+      scoreString: "",
+      updatedScores: updatedStudent?.totalExamScores || [],
+      timestamp: Date.now(),
+    }).catch(console.warn);
+  }, [students]);
 
   // Handler: Manage Users
   const handleAddUser = (newUser: UserAccount) => {
@@ -1364,6 +1727,7 @@ export default function App() {
                 <CumulativeGradesReport
                   students={students}
                   onUpdateGradeRecord={handleUpdateGradeRecord}
+                  onClearGrade={handleClearGrade}
                   onOpenPdfModal={(type) => setPrintModal({ open: true, type })}
                 />
               )}
@@ -1395,6 +1759,7 @@ export default function App() {
                 <ExamGradesTab
                   students={students}
                   onRecordGrade={handleRecordExamGrade}
+                  onClearGrade={handleClearGrade}
                 />
               )}
 

@@ -4,16 +4,18 @@ import { openWhatsApp, SCHOOL_WHATSAPP_PHONE, sortStudentsByGradeAndName } from 
 import { enqueuePlatformMessage } from "../utils/storage";
 import { playBeep } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
-import { FileCheck2, Send, Sparkles, UserCheck, MessageSquare, Clock, CheckCircle2, Loader2 } from "lucide-react";
+import { FileCheck2, Send, Sparkles, UserCheck, MessageSquare, Clock, CheckCircle2, Loader2, Trash2 } from "lucide-react";
 
 interface ExamGradesTabProps {
   students: Student[];
   onRecordGrade: (barcode: string, examTitle: string, score: number, maxScore: number) => void;
+  onClearGrade?: (barcode: string) => void;
 }
 
 export const ExamGradesTab: React.FC<ExamGradesTabProps> = ({
   students,
   onRecordGrade,
+  onClearGrade,
 }) => {
   // Retain the exam title and maximum score across submissions and browser refreshes
   const [examTitle, setExamTitle] = useState<string>(() => {
@@ -343,17 +345,37 @@ export const ExamGradesTab: React.FC<ExamGradesTabProps> = ({
               </div>
             </div>
             
-            {lastRecordedInfo.phone && lastRecordedInfo.message && (
-              <button
-                type="button"
-                onClick={() => openWhatsApp(lastRecordedInfo.phone!, lastRecordedInfo.message!)}
-                className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 text-emerald-300 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-                title="خيار جانبي يدوي: فتح واتساب ولي الأمر وإرسال النتيجة"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>إرسال واتساب يدوي (خيار جانبي)</span>
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {onClearGrade && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm(`هل أنت متأكد من التراجع ومسح درجة الطالب (${lastRecordedInfo.studentName}) التي تم رصدها للتو؟`)) {
+                      onClearGrade(lastRecordedInfo.barcode);
+                      setFeedback({ type: "success", message: `تم مسح درجة (${lastRecordedInfo.studentName}) وإلغاء الرصد بنجاح!` });
+                      setLastRecordedInfo(null);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/40 border border-rose-500/40 text-rose-300 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                  title="التراجع ومسح هذه الدرجة فوراً"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>تراجع ومسح الدرجة</span>
+                </button>
+              )}
+
+              {lastRecordedInfo.phone && lastRecordedInfo.message && (
+                <button
+                  type="button"
+                  onClick={() => openWhatsApp(lastRecordedInfo.phone!, lastRecordedInfo.message!)}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 text-emerald-300 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  title="خيار جانبي يدوي: فتح واتساب ولي الأمر وإرسال النتيجة"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>إرسال واتساب يدوي</span>
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>

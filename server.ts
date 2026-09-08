@@ -4,7 +4,15 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import webpush from "web-push";
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, collection, getDocs, deleteDoc, doc, setDoc } from "firebase/firestore";
+import {
+  getFirestore,
+  collection,
+  getDocs,
+  deleteDoc,
+  doc,
+  setDoc,
+  onSnapshot,
+} from "firebase/firestore";
 import firebaseConfig from "./firebase-applet-config.json";
 
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
@@ -58,7 +66,7 @@ const SUBS_FILE = path.join(process.cwd(), ".push_subscriptions_store.json");
 function normalizeId(id: string): string {
   let s = String(id || "").trim();
   if (s.startsWith("+2")) s = s.slice(2);
-  if (s.startsWith("0")) s = s.slice(1);
+  if (s.startsWith("0") && s.length >= 10) s = s.slice(1);
   return s;
 }
 
@@ -190,84 +198,167 @@ app.post("/api/push-subscribe", (req, res) => {
   }
 });
 
+// ----------------------------------------------------
+// CORE WEB PUSH DISPATCHER
+// ----------------------------------------------------
+interface SendPushParams {
+  targetUserIds?: string | string[];
+  role?: "parent" | "admin" | "all";
+  title: string;
+  body: string;
+  icon?: string;
+  badge?: string;
+  url?: string;
+  tag?: string;
+  eventId?: string;
+  type?: string;
+  sound?: string;
+}
+
+async function sendWebPushToTargets(params: SendPushParams): Promise<{
+  sent: number;
+  failed: number;
+  cleaned: number;
+}> {
+  const {
+    targetUserIds,
+    role,
+    title,
+    body,
+    icon,
+    badge,
+    url,
+    tag,
+    eventId,
+    type,
+    sound,
+  } = params;
+
+  if (!title || !body) {
+    return { sent: 0, failed: 0, cleaned: 0 };
+  }
+
+  const payload = JSON.stringify({
+    title: String(title),
+    body: String(body),
+    icon: icon || "/icon.svg",
+    badge: badge || "/icon.svg",
+    url: url || "/",
+    tag: tag || `eman-${type || "alert"}-${Date.now()}`,
+    eventId: eventId || `ev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    type: type || "alert",
+    sound: sound || "/notification.wav",
+    timestamp: Date.now(),
+  });
+
+  const targetList = Array.isArray(targetUserIds)
+    ? targetUserIds.map((id) => String(id).trim()).filter(Boolean)
+    : targetUserIds
+    ? [String(targetUserIds).trim()]
+    : [];
+
+  const normalizedTargets = new Set<string>();
+  targetList.forEach((t) => {
+    normalizedTargets.add(t);
+    const norm = normalizeId(t);
+    if (norm) normalizedTargets.add(norm);
+  });
+
+  const matchedSubs: StoredSubscription[] = [];
+
+  for (const sub of subscriptionsCache.values()) {
+    let isMatch = false;
+
+    // Filter by target IDs (e.g. barcode or parent phone)
+    if (targetList.length > 0) {
+      const subIds = [sub.userId, ...(sub.aliases || [])];
+      for (const sId of subIds) {
+        if (normalizedTargets.has(sId) || normalizedTargets.has(normalizeId(sId))) {
+          isMatch = true;
+          break;
+        }
+      }
+    } else if (role) {
+      if (sub.userRole === role || role === "all") {
+        isMatch = true;
+      }
+    } else {
+      isMatch = true;
+    }
+
+    if (isMatch) {
+      matchedSubs.push(sub);
+    }
+  }
+
+  if (matchedSubs.length === 0) {
+    return { sent: 0, failed: 0, cleaned: 0 };
+  }
+
+  let deliveredCount = 0;
+  let failedCount = 0;
+  const deadEndpoints: string[] = [];
+
+  await Promise.all(
+    matchedSubs.map(async (sub) => {
+      try {
+        await webpush.sendNotification(
+          {
+            endpoint: sub.endpoint,
+            keys: sub.keys,
+          },
+          payload,
+          {
+            TTL: 86400, // 24 hours delivery guarantee by browser push service
+            urgency: "high",
+          }
+        );
+        deliveredCount++;
+      } catch (err: any) {
+        failedCount++;
+        // 404 or 410 Gone means the user uninstalled or revoked permission
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          deadEndpoints.push(sub.endpoint);
+        } else {
+          console.warn(`[Push Error] Endpoint ${sub.endpoint.slice(0, 35)}... status:`, err.statusCode || err.message);
+        }
+      }
+    })
+  );
+
+  // Clean up dead subscriptions (e.g. uninstalled or expired)
+  if (deadEndpoints.length > 0) {
+    deadEndpoints.forEach((ep) => {
+      subscriptionsCache.delete(ep);
+      try {
+        const cleanDocId = encodeURIComponent(ep).slice(-80);
+        deleteDoc(doc(db, "push_subscriptions", cleanDocId)).catch(() => {});
+      } catch {}
+    });
+    persistStoredSubscriptions();
+  }
+
+  return {
+    sent: deliveredCount,
+    failed: failedCount,
+    cleaned: deadEndpoints.length,
+  };
+}
+
 // 4. Send Web Push Notification to Specific User(s) or Role
 app.post("/api/send-push", async (req, res) => {
   try {
-    const {
-      targetUserIds,
-      role,
-      title,
-      body,
-      icon,
-      badge,
-      url,
-      tag,
-      eventId,
-      type,
-    } = req.body;
-
-    // Dynamically sync subscriptions from Firestore before checking targets
-    await syncSubscriptionsFromFirestore();
-
+    const { title, body } = req.body;
     if (!title || !body) {
       return res.status(400).json({ error: "title and body are required" });
     }
 
-    const payload = JSON.stringify({
-      title: String(title),
-      body: String(body),
-      icon: icon || "/icon.svg",
-      badge: badge || "/icon.svg",
-      url: url || "/",
-      tag: tag || `eman-${type || "alert"}-${Date.now()}`,
-      eventId: eventId || `ev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      type: type || "alert",
-      timestamp: Date.now(),
-    });
+    // Ensure subscriptions are fresh
+    await syncSubscriptionsFromFirestore();
 
-    const targetList = Array.isArray(targetUserIds)
-      ? targetUserIds.map((id) => String(id).trim()).filter(Boolean)
-      : targetUserIds
-      ? [String(targetUserIds).trim()]
-      : [];
+    const result = await sendWebPushToTargets(req.body);
 
-    const normalizedTargets = new Set<string>();
-    targetList.forEach((t) => {
-      normalizedTargets.add(t);
-      const norm = normalizeId(t);
-      if (norm) normalizedTargets.add(norm);
-    });
-
-    const matchedSubs: StoredSubscription[] = [];
-
-    for (const sub of subscriptionsCache.values()) {
-      let isMatch = false;
-
-      // Filter by target IDs (e.g. barcode or parent phone)
-      if (targetList.length > 0) {
-        const subIds = [sub.userId, ...(sub.aliases || [])];
-        for (const sId of subIds) {
-          if (normalizedTargets.has(sId) || normalizedTargets.has(normalizeId(sId))) {
-            isMatch = true;
-            break;
-          }
-        }
-      } else if (role) {
-        // Filter by role (e.g. all parents or all admins)
-        if (sub.userRole === role || (role === "all")) {
-          isMatch = true;
-        }
-      } else {
-        // No filter: broadcast to all
-        isMatch = true;
-      }
-
-      if (isMatch) {
-        matchedSubs.push(sub);
-      }
-    }
-
-    if (matchedSubs.length === 0) {
+    if (result.sent === 0 && result.failed === 0) {
       return res.json({
         success: true,
         sent: 0,
@@ -275,54 +366,11 @@ app.post("/api/send-push", async (req, res) => {
       });
     }
 
-    let deliveredCount = 0;
-    let failedCount = 0;
-    const deadEndpoints: string[] = [];
-
-    await Promise.all(
-      matchedSubs.map(async (sub) => {
-        try {
-          await webpush.sendNotification(
-            {
-              endpoint: sub.endpoint,
-              keys: sub.keys,
-            },
-            payload,
-            {
-              TTL: 86400, // 24 hours delivery guarantee by push service
-              urgency: "high",
-            }
-          );
-          deliveredCount++;
-        } catch (err: any) {
-          failedCount++;
-          // 404 or 410 Gone means the user uninstalled or revoked permission
-          if (err.statusCode === 404 || err.statusCode === 410) {
-            deadEndpoints.push(sub.endpoint);
-          } else {
-            console.warn(`[Push Error] Endpoint ${sub.endpoint.slice(0, 35)}... status:`, err.statusCode || err.message);
-          }
-        }
-      })
-    );
-
-    // Clean up dead subscriptions (e.g. uninstalled or expired)
-    if (deadEndpoints.length > 0) {
-      deadEndpoints.forEach((ep) => {
-        subscriptionsCache.delete(ep);
-        try {
-          const cleanDocId = encodeURIComponent(ep).slice(-80);
-          deleteDoc(doc(db, "push_subscriptions", cleanDocId)).catch(() => {});
-        } catch {}
-      });
-      persistStoredSubscriptions();
-    }
-
     return res.json({
       success: true,
-      sent: deliveredCount,
-      failed: failedCount,
-      cleaned: deadEndpoints.length,
+      sent: result.sent,
+      failed: result.failed,
+      cleaned: result.cleaned,
     });
   } catch (err: any) {
     console.error("send-push error:", err);
@@ -331,9 +379,181 @@ app.post("/api/send-push", async (req, res) => {
 });
 
 // ----------------------------------------------------
+// 24/7 AUTONOMOUS BACKGROUND FIRESTORE LISTENERS
+// Guarantees push notifications with audio chime even when app is closed
+// ----------------------------------------------------
+let cachedStudents: any[] = [];
+let knownPayments = new Set<string>();
+let isInitialPaymentsLoaded = false;
+let lastProcessedLiveEventTime = Date.now() - 30000;
+
+function setupAutonomousBackgroundPushListeners() {
+  console.log("[Background Push] Initializing 24/7 autonomous Firestore listeners...");
+
+  // 1. Subscribe to push_subscriptions collection in Firestore to keep memory cache continuously updated
+  try {
+    onSnapshot(collection(db, "push_subscriptions"), (snap) => {
+      snap.docChanges().forEach((change) => {
+        const data = change.doc.data();
+        if (data.endpoint && data.p256dh && data.auth) {
+          if (change.type === "added" || change.type === "modified") {
+            subscriptionsCache.set(data.endpoint, {
+              userId: String(data.userId || "guest").trim(),
+              aliases: Array.isArray(data.aliases) ? data.aliases.map(String) : [],
+              userRole: data.userRole || "parent",
+              endpoint: data.endpoint,
+              keys: {
+                p256dh: data.p256dh,
+                auth: data.auth,
+              },
+              userAgent: data.userAgent || "",
+              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now(),
+            });
+          } else if (change.type === "removed") {
+            subscriptionsCache.delete(data.endpoint);
+          }
+        }
+      });
+      persistStoredSubscriptions();
+    }, (err) => {
+      console.warn("[Background Push] push_subscriptions listener error:", err.message);
+    });
+  } catch (err: any) {
+    console.warn("[Background Push] failed to listen to push_subscriptions:", err.message);
+  }
+
+  // 2. Listen to live attendance events (scans from any device or external site)
+  try {
+    onSnapshot(doc(db, "live_events", "today"), async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const last = data?.lastEvent;
+      if (!last || !last.timestamp || last.timestamp <= lastProcessedLiveEventTime) return;
+      lastProcessedLiveEventTime = last.timestamp;
+
+      const barcode = String(last.barcode || "").trim();
+      const student = cachedStudents.find((s) => String(s.barcode).trim() === barcode);
+      const studentName = last.studentName || student?.name || "الطالب";
+      const status = last.status || "حضور";
+
+      let title = "منظومة الرياضيات - الأستاذة إيمان الدمشيتي";
+      let body = "";
+      let eventType = "attendance";
+
+      if (status === "حضور") {
+        title = `🟢 تسجيل حضور: ${studentName}`;
+        body = `تم تسجيل حضور ووصول الطالب (${studentName}) في المركز بنجاح (${last.timeDisplay || "الآن"}).`;
+        eventType = "attendance";
+      } else if (status === "تأخير") {
+        title = `⚠️ تنبيه تأخير: ${studentName}`;
+        body = `تم تسجيل حضور الطالب (${studentName}) متأخراً عن موعد بداية الحصة (${last.timeDisplay || "الآن"}).`;
+        eventType = "late";
+      } else if (status === "غياب") {
+        title = `🔴 تنبيه غياب: ${studentName}`;
+        body = `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${studentName}) عن حصة اليوم.`;
+        eventType = "absence";
+      }
+
+      const targets: string[] = [barcode];
+      if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+      if (student?.phone) targets.push(String(student.phone).trim());
+      targets.push("admin");
+
+      console.log(`[Background Push] Live scan event detected: ${studentName} (${status}). Sending push to:`, targets);
+      await sendWebPushToTargets({
+        targetUserIds: targets,
+        title,
+        body,
+        icon: "/icon.svg",
+        badge: "/icon.svg",
+        type: eventType,
+        sound: "/notification.wav",
+        url: `/?tab=attendance&barcode=${barcode}`,
+        eventId: last.id || `live-${last.timestamp}`,
+      });
+    }, (err) => {
+      console.warn("[Background Push] live_events onSnapshot warning:", err.message);
+    });
+  } catch (err: any) {
+    console.warn("[Background Push] failed to listen to live_events:", err.message);
+  }
+
+  // 3. Listen to system_state/main_center_data for students and new payments
+  try {
+    onSnapshot(doc(db, "system_state", "main_center_data"), async (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      if (Array.isArray(data?.students)) {
+        cachedStudents = data.students;
+      }
+
+      // Check payments
+      const payments = data?.payments;
+      if (payments && typeof payments === "object") {
+        const currentKeys = new Set<string>();
+        const newPaymentsToNotify: Array<{ monthKey: string; barcode: string; rec: any }> = [];
+
+        for (const [mKey, map] of Object.entries(payments)) {
+          if (map && typeof map === "object") {
+            for (const [bCode, rec] of Object.entries(map as any)) {
+              if (rec && Number((rec as any).amount) > 0) {
+                const key = `${mKey}:${bCode}`;
+                currentKeys.add(key);
+                if (isInitialPaymentsLoaded && !knownPayments.has(key)) {
+                  newPaymentsToNotify.push({ monthKey: mKey, barcode: bCode, rec });
+                }
+              }
+            }
+          }
+        }
+
+        knownPayments = currentKeys;
+        if (!isInitialPaymentsLoaded) {
+          isInitialPaymentsLoaded = true;
+        } else {
+          for (const item of newPaymentsToNotify) {
+            const student = cachedStudents.find((s) => String(s.barcode).trim() === item.barcode);
+            const studentName = student?.name || item.rec?.studentName || "الطالب";
+            const amount = item.rec?.amount || 0;
+            const title = `💳 سداد مصاريف: ${studentName}`;
+            const body = `تم بنجاح سداد اشتراك شهر (${item.monthKey}) للطالب (${studentName}) بمبلغ ${amount} ج.م.`;
+
+            const targets: string[] = [item.barcode];
+            if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+            if (student?.phone) targets.push(String(student.phone).trim());
+            targets.push("admin");
+
+            console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
+            await sendWebPushToTargets({
+              targetUserIds: targets,
+              title,
+              body,
+              icon: "/icon.svg",
+              badge: "/icon.svg",
+              type: "payment",
+              sound: "/notification.wav",
+              url: `/?tab=expenses&barcode=${item.barcode}`,
+              eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
+            });
+          }
+        }
+      }
+    }, (err) => {
+      console.warn("[Background Push] main_center_data onSnapshot warning:", err.message);
+    });
+  } catch (err: any) {
+    console.warn("[Background Push] failed to listen to system_state:", err.message);
+  }
+}
+
+// ----------------------------------------------------
 // VITE MIDDLEWARE / STATIC ASSETS SERVING
 // ----------------------------------------------------
 async function startServer() {
+  loadStoredSubscriptions();
+  await syncSubscriptionsFromFirestore();
+  setupAutonomousBackgroundPushListeners();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

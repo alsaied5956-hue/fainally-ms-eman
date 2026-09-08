@@ -77,6 +77,37 @@ export interface StudentSyncPayload {
   timestamp: number;
 }
 
+export interface AttendanceStatusSyncPayload {
+  action: "update" | "delete";
+  barcode: string;
+  dateKey: string;
+  status: string; // "" or "لم يسجل" for deletion/clearance
+  previousStatus?: string;
+  changedBy?: string;
+  timestamp: number;
+}
+
+export interface GradeSyncPayload {
+  action: "record" | "update" | "clear" | "delete";
+  barcode: string;
+  examTitle?: string;
+  score?: number;
+  maxScore?: number;
+  scoreFormatted?: string;
+  scoreString?: string;
+  points?: number;
+  totalExamScores?: number[];
+  updatedScores?: number[];
+  timestamp: number;
+}
+
+export interface SessionClearedSyncPayload {
+  grade: string;
+  resetTodayAttendance?: boolean;
+  clearedBy?: string;
+  timestamp: number;
+}
+
 export function getTodayDateKey(): string {
   const d = new Date();
   const year = d.getFullYear();
@@ -183,6 +214,34 @@ export async function broadcastStudentChange(payload: StudentSyncPayload): Promi
   }
 }
 
+/** Broadcast single attendance status update or deletion/clearance across all devices */
+export async function broadcastAttendanceStatusChange(payload: AttendanceStatusSyncPayload): Promise<void> {
+  try {
+    const channel = getOrCreateRealtimeHub();
+    await channel.send({
+      type: "broadcast",
+      event: "attendance_status_change",
+      payload,
+    });
+  } catch (err) {
+    console.warn("Realtime broadcast attendance status notice:", err);
+  }
+}
+
+/** Broadcast grade recording, modification, or clearance across all devices */
+export async function broadcastGradeChange(payload: GradeSyncPayload): Promise<void> {
+  try {
+    const channel = getOrCreateRealtimeHub();
+    await channel.send({
+      type: "broadcast",
+      event: "grade_change",
+      payload,
+    });
+  } catch (err) {
+    console.warn("Realtime broadcast grade notice:", err);
+  }
+}
+
 // ------------------------------------------------------------------------
 // 3. LISTENERS (Instant Reception on All Devices)
 // ------------------------------------------------------------------------
@@ -211,16 +270,119 @@ export function subscribeToGroupFinished(
   return () => {};
 }
 
+// In-memory barcode to student_id cache to avoid redundant network lookups
+const barcodeToIdCache = new Map<string, string>();
+
+const paymentListeners = new Set<(payload: PaymentSyncPayload) => void>();
+let paymentsDbChannel: RealtimeChannel | null = null;
+
+function initPaymentsDbChannelOnce(): void {
+  if (paymentsDbChannel) return;
+  try {
+    // Note: In Supabase, postgres_changes callbacks MUST be registered BEFORE calling .subscribe()
+    paymentsDbChannel = supabase
+      .channel("payments-db-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "payments" },
+        async (payload) => {
+          try {
+            if (payload.eventType === "DELETE") {
+              const oldRow = payload.old as any;
+              if (oldRow) {
+                let barcode = "";
+                for (const [b, id] of barcodeToIdCache.entries()) {
+                  if (id === oldRow.student_id) {
+                    barcode = b;
+                    break;
+                  }
+                }
+                if (!barcode && oldRow.student_id) {
+                  const { data } = await supabase.from("students").select("barcode").eq("id", oldRow.student_id).maybeSingle();
+                  if (data?.barcode) barcode = data.barcode;
+                }
+                if (barcode && oldRow.month_key) {
+                  const syncPayload: PaymentSyncPayload = {
+                    action: "delete",
+                    barcode,
+                    monthKey: oldRow.month_key,
+                    amount: 0,
+                    date: "",
+                    time: "",
+                    note: "",
+                    recordedBy: "external_sync",
+                    timestamp: Date.now(),
+                  };
+                  paymentListeners.forEach((fn) => {
+                    try { fn(syncPayload); } catch {}
+                  });
+                }
+              }
+            } else if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
+              const newRow = payload.new as any;
+              if (newRow) {
+                let barcode = "";
+                for (const [b, id] of barcodeToIdCache.entries()) {
+                  if (id === newRow.student_id) {
+                    barcode = b;
+                    break;
+                  }
+                }
+                if (!barcode && newRow.student_id) {
+                  const { data } = await supabase.from("students").select("barcode").eq("id", newRow.student_id).maybeSingle();
+                  if (data?.barcode) barcode = data.barcode;
+                }
+                if (barcode && newRow.month_key) {
+                  const syncPayload: PaymentSyncPayload = {
+                    action: payload.eventType === "INSERT" ? "record" : "update",
+                    barcode,
+                    monthKey: newRow.month_key,
+                    amount: Number(newRow.amount_paid) || 0,
+                    date: newRow.payment_date || "",
+                    time: "",
+                    note: newRow.notes || "",
+                    recordedBy: newRow.received_by || "external_sync",
+                    timestamp: Date.now(),
+                  };
+                  paymentListeners.forEach((fn) => {
+                    try { fn(syncPayload); } catch {}
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            console.warn("Postgres CDC payments listener error:", err);
+          }
+        }
+      );
+
+    paymentsDbChannel.subscribe((status) => {
+      console.log(`[Supabase Payments DB Channel] Status: ${status}`);
+    });
+  } catch (err) {
+    console.warn("Failed to initialize payments DB channel:", err);
+  }
+}
+
 export function subscribeToPaymentChanges(
   onPaymentChanged: (payload: PaymentSyncPayload) => void
 ): () => void {
-  const channel = getOrCreateRealtimeHub();
-  channel.on("broadcast", { event: "payment_change" }, ({ payload }) => {
+  paymentListeners.add(onPaymentChanged);
+
+  // 1. WebSocket sub-20ms broadcast event
+  const hubChannel = getOrCreateRealtimeHub();
+  hubChannel.on("broadcast", { event: "payment_change" }, ({ payload }) => {
     if (payload && typeof onPaymentChanged === "function") {
       onPaymentChanged(payload as PaymentSyncPayload);
     }
   });
-  return () => {};
+
+  // 2. Dedicated channel for Postgres changes (registered before subscribe)
+  initPaymentsDbChannelOnce();
+
+  return () => {
+    paymentListeners.delete(onPaymentChanged);
+  };
 }
 
 export function subscribeToHomeworkChanges(
@@ -235,24 +397,156 @@ export function subscribeToHomeworkChanges(
   return () => {};
 }
 
+const studentListeners = new Set<(payload: StudentSyncPayload) => void>();
+let studentsDbChannel: RealtimeChannel | null = null;
+
+function initStudentsDbChannelOnce(): void {
+  if (studentsDbChannel) return;
+  try {
+    studentsDbChannel = supabase
+      .channel("students-db-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "students" },
+        (payload) => {
+          try {
+            if (payload.eventType === "DELETE") {
+              const oldRow = payload.old as any;
+              const barcode = oldRow?.barcode;
+              if (barcode) {
+                studentListeners.forEach((fn) => {
+                  try { fn({ action: "delete", barcode, timestamp: Date.now() }); } catch {}
+                });
+              }
+            } else if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
+              const newRow = payload.new as any;
+              if (newRow?.barcode) {
+                studentListeners.forEach((fn) => {
+                  try {
+                    fn({
+                      action: payload.eventType === "INSERT" ? "add" : "update",
+                      barcode: newRow.barcode,
+                      studentData: {
+                        barcode: newRow.barcode,
+                        name: newRow.name,
+                        phone: newRow.phone,
+                        parentPhone: newRow.parent_phone,
+                        groupGrade: newRow.grade,
+                        groupDays: newRow.group_days,
+                        notes: newRow.notes,
+                        updatedAt: Date.now(),
+                      },
+                      timestamp: Date.now(),
+                    });
+                  } catch {}
+                });
+              }
+            }
+          } catch (err) {
+            console.warn("Postgres CDC students listener error:", err);
+          }
+        }
+      );
+    studentsDbChannel.subscribe((status) => {
+      console.log(`[Supabase Students DB Channel] Status: ${status}`);
+    });
+  } catch (err) {
+    console.warn("Failed to initialize students DB channel:", err);
+  }
+}
+
 export function subscribeToStudentChanges(
   onStudentChanged: (payload: StudentSyncPayload) => void
 ): () => void {
-  const channel = getOrCreateRealtimeHub();
-  channel.on("broadcast", { event: "student_change" }, ({ payload }) => {
+  studentListeners.add(onStudentChanged);
+
+  const hubChannel = getOrCreateRealtimeHub();
+  hubChannel.on("broadcast", { event: "student_change" }, ({ payload }) => {
     if (payload && typeof onStudentChanged === "function") {
       onStudentChanged(payload as StudentSyncPayload);
     }
   });
-  return () => {};
+
+  initStudentsDbChannelOnce();
+
+  return () => {
+    studentListeners.delete(onStudentChanged);
+  };
+}
+
+const attendanceStatusListeners = new Set<(payload: AttendanceStatusSyncPayload) => void>();
+
+export function subscribeToAttendanceStatusChanges(
+  onAttendanceChanged: (payload: AttendanceStatusSyncPayload) => void
+): () => void {
+  attendanceStatusListeners.add(onAttendanceChanged);
+
+  const hubChannel = getOrCreateRealtimeHub();
+  hubChannel.on("broadcast", { event: "attendance_status_change" }, ({ payload }) => {
+    if (payload && typeof onAttendanceChanged === "function") {
+      onAttendanceChanged(payload as AttendanceStatusSyncPayload);
+    }
+  });
+
+  return () => {
+    attendanceStatusListeners.delete(onAttendanceChanged);
+  };
+}
+
+const gradeChangeListeners = new Set<(payload: GradeSyncPayload) => void>();
+
+export function subscribeToGradeChanges(
+  onGradeChanged: (payload: GradeSyncPayload) => void
+): () => void {
+  gradeChangeListeners.add(onGradeChanged);
+
+  const hubChannel = getOrCreateRealtimeHub();
+  hubChannel.on("broadcast", { event: "grade_change" }, ({ payload }) => {
+    if (payload && typeof onGradeChanged === "function") {
+      onGradeChanged(payload as GradeSyncPayload);
+    }
+  });
+
+  return () => {
+    gradeChangeListeners.delete(onGradeChanged);
+  };
+}
+
+export async function broadcastSessionCleared(payload: SessionClearedSyncPayload): Promise<void> {
+  try {
+    const hubChannel = getOrCreateRealtimeHub();
+    await hubChannel.send({
+      type: "broadcast",
+      event: "session_cleared",
+      payload,
+    });
+  } catch (err) {
+    console.warn("broadcastSessionCleared error:", err);
+  }
+}
+
+const sessionClearedListeners = new Set<(payload: SessionClearedSyncPayload) => void>();
+
+export function subscribeToSessionCleared(
+  onSessionCleared: (payload: SessionClearedSyncPayload) => void
+): () => void {
+  sessionClearedListeners.add(onSessionCleared);
+
+  const hubChannel = getOrCreateRealtimeHub();
+  hubChannel.on("broadcast", { event: "session_cleared" }, ({ payload }) => {
+    if (payload && typeof onSessionCleared === "function") {
+      onSessionCleared(payload as SessionClearedSyncPayload);
+    }
+  });
+
+  return () => {
+    sessionClearedListeners.delete(onSessionCleared);
+  };
 }
 
 // ------------------------------------------------------------------------
 // 4. SUPABASE POSTGRES PERSISTENCE HELPERS
 // ------------------------------------------------------------------------
-
-// In-memory barcode to student_id cache to avoid redundant network lookups
-const barcodeToIdCache = new Map<string, string>();
 
 async function getStudentIdByBarcode(barcode: string): Promise<string | null> {
   try {
@@ -353,6 +647,22 @@ export async function saveBulkAttendanceToSupabase(
     }
   } catch (err) {
     console.warn("saveBulkAttendanceToSupabase error:", err);
+  }
+}
+
+/** Delete single attendance record from Supabase */
+export async function deleteAttendanceFromSupabase(barcode: string, dateKey: string): Promise<void> {
+  try {
+    const studentId = await getStudentIdByBarcode(barcode);
+    if (!studentId) return;
+
+    await supabase
+      .from("attendance_logs")
+      .delete()
+      .eq("student_id", studentId)
+      .eq("date_key", dateKey);
+  } catch (err) {
+    console.warn("deleteAttendanceFromSupabase error:", err);
   }
 }
 

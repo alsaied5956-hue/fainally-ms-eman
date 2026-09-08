@@ -14,6 +14,7 @@ import {
   MessageSquare,
   RefreshCw,
   Phone,
+  Trash2,
 } from "lucide-react";
 
 interface EditGradeModalProps {
@@ -29,6 +30,7 @@ interface EditGradeModalProps {
     openChatWithParent: boolean,
     customMessage?: string
   ) => void;
+  onClearGrade?: (barcode: string) => void;
 }
 
 export const EditGradeModal: React.FC<EditGradeModalProps> = ({
@@ -36,6 +38,7 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
   isOpen,
   onClose,
   onSaveGrade,
+  onClearGrade,
 }) => {
   const [examTitle, setExamTitle] = useState("");
   const [maxScore, setMaxScore] = useState<number>(10);
@@ -46,6 +49,7 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
   const [isCustomMsgEdited, setIsCustomMsgEdited] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
   // Parse existing student score on modal open
   useEffect(() => {
@@ -80,6 +84,7 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
       setIsCustomMsgEdited(false);
       setErrorMsg(null);
       setCopied(false);
+      setShowClearConfirm(false);
     }
   }, [student, isOpen]);
 
@@ -409,22 +414,65 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
           </div>
 
           {/* Modal Action Buttons */}
-          <div className="flex flex-wrap items-center justify-end gap-2.5 pt-3 border-t border-indigo-500/20 shrink-0">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer transition-all"
-            >
-              إلغاء
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-2.5 pt-3 border-t border-indigo-500/20 shrink-0">
+            {onClearGrade && student?.lastExamScore ? (
+              <div>
+                {showClearConfirm ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-rose-400 font-bold text-[11px]">تأكيد مسح الدرجة؟</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (student) {
+                          onClearGrade(student.barcode);
+                          onClose();
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-xs cursor-pointer transition-all active:scale-95 shadow-md shadow-rose-600/30"
+                    >
+                      نعم، مسح الدرجة بالكامل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowClearConfirm(false)}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-bold cursor-pointer hover:bg-slate-700"
+                    >
+                      إلغاء
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirm(true)}
+                    className="px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all hover:scale-105 active:scale-95"
+                    title="مسح وإلغاء درجة هذا الطالب بالكامل"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>مسح الدرجة بالكامل</span>
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div />
+            )}
 
-            <button
-              type="submit"
-              className="px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-300 to-yellow-200 hover:from-amber-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-500/25 flex items-center gap-2 cursor-pointer transition-all active:scale-95"
-            >
-              <CheckCircle2 className="w-4 h-4 text-slate-950" />
-              <span>{shouldOpenWhatsApp ? "حفظ التعديل ومراسلة واتساب 📲" : "حفظ التعديل وبث إشعار المنصة 💾"}</span>
-            </button>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer transition-all"
+              >
+                إلغاء
+              </button>
+
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-300 to-yellow-200 hover:from-amber-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-500/25 flex items-center gap-2 cursor-pointer transition-all active:scale-95"
+              >
+                <CheckCircle2 className="w-4 h-4 text-slate-950" />
+                <span>{shouldOpenWhatsApp ? "حفظ التعديل ومراسلة واتساب 📲" : "حفظ التعديل وبث إشعار المنصة 💾"}</span>
+              </button>
+            </div>
           </div>
         </form>
       </div>

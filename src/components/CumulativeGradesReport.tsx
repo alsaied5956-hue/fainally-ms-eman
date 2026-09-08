@@ -5,7 +5,7 @@ import { matchStudentSearch } from "../utils/search";
 import { exportAllExamsToExcel } from "../utils/excel";
 import { enqueuePlatformMessage } from "../utils/storage";
 import { EditGradeModal } from "./EditGradeModal";
-import { Award, FileSpreadsheet, FileText, Search, Edit3, Star, X, CheckCircle2 } from "lucide-react";
+import { Award, FileSpreadsheet, FileText, Search, Edit3, Star, X, CheckCircle2, Trash2 } from "lucide-react";
 
 interface CumulativeGradesReportProps {
   students: Student[];
@@ -16,12 +16,14 @@ interface CumulativeGradesReportProps {
     newPoints: number,
     updatedScores: number[]
   ) => void;
+  onClearGrade?: (barcode: string) => void;
   onOpenPdfModal: (type: "exams") => void;
 }
 
 export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
   students,
   onUpdateGradeRecord,
+  onClearGrade,
   onOpenPdfModal,
 }) => {
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
@@ -266,8 +268,25 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                             title="تعديل رصد درجة الامتحان وحساب النسبة"
                           >
                             <Edit3 className="w-3 h-3" />
-                            <span>تعديل الدرجة</span>
+                            <span>تعديل</span>
                           </button>
+
+                          {onClearGrade && student.lastExamScore && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm(`هل أنت متأكد من مسح درجة الطالب (${student.name}) بالكامل؟`)) {
+                                  onClearGrade(student.barcode);
+                                  setFeedback({ type: "success", message: `تم مسح درجة الطالب (${student.name}) بنجاح!` });
+                                  setTimeout(() => setFeedback(null), 3500);
+                                }
+                              }}
+                              className="px-2 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all hover:scale-105 active:scale-95"
+                              title="مسح الدرجة بالكامل"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>مسح</span>
+                            </button>
+                          )}
 
                           <button
                             onClick={() => {
@@ -298,6 +317,13 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
           isOpen={!!selectedStudentForEdit}
           onClose={() => setSelectedStudentForEdit(null)}
           onSaveGrade={handleSaveGradeFromModal}
+          onClearGrade={(bCode) => {
+            if (onClearGrade) {
+              onClearGrade(bCode);
+              setFeedback({ type: "success", message: "تم مسح الدرجة بالكامل وبث التزامن فورياً!" });
+              setTimeout(() => setFeedback(null), 3500);
+            }
+          }}
         />
       )}
     </div>

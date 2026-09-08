@@ -63,6 +63,8 @@ export interface SystemData {
   pendingWhatsAppMessages?: PendingWhatsAppMessage[]; // Auxiliary/backward-compatible
   gradeWhatsAppLinks?: Record<string, string>; // Auxiliary
   deletedBarcodes?: string[]; // Track deleted student barcodes to prevent zombie resurrects
+  deletedPaymentKeys?: string[]; // Track deleted or cancelled payments ("monthKey:barcode") to prevent zombie resurrects
+  deletedAttendanceKeys?: string[]; // Track deleted or cleared attendance ("dateKey:barcode") to prevent zombie resurrects
   scanLogUpdatedAt?: number; // Exact timestamp when scanLog was modified
   updatedAt?: number; // Epoch timestamp in ms for conflict resolution
 }
@@ -167,6 +169,8 @@ export const INITIAL_SYSTEM_DATA: SystemData = {
   pendingWhatsAppMessages: Array.isArray(centerBackup?.pendingWhatsAppMessages) ? (centerBackup.pendingWhatsAppMessages as any[]) : [],
   gradeWhatsAppLinks: (centerBackup?.gradeWhatsAppLinks as Record<string, string>) || {},
   deletedBarcodes: [],
+  deletedPaymentKeys: [],
+  deletedAttendanceKeys: [],
   scanLogUpdatedAt: Date.now(),
   updatedAt: Date.now(),
 };
@@ -428,24 +432,49 @@ export function loadLocalData(): SystemData {
 
     const normalizedPrimaryPayments = normalizeAndMigratePayments(parsed.payments);
     const normalizedLegacyPayments = normalizeAndMigratePayments(legacyPayments);
+    const deletedPaymentSet = new Set((parsed.deletedPaymentKeys || []).map(String));
 
-    // Merge backup payments, legacy payments, and primary payments
-    const mergedPayments: Record<string, Record<string, PaymentRecord>> = {
-      ...backupPayments,
-      ...normalizedLegacyPayments,
-      ...normalizedPrimaryPayments,
-    };
-    for (const [mKey, recMap] of Object.entries(backupPayments)) {
-      mergedPayments[mKey] = {
-        ...(mergedPayments[mKey] || {}),
-        ...recMap,
-      };
+    // Merge payments safely: primary local payments take absolute precedence over backup payments
+    const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
+    const hasParsedPayments = Boolean(parsed.payments && Object.keys(parsed.payments).length > 0);
+
+    // If no parsed payments exist, use backup payments as cold start
+    if (!hasParsedPayments) {
+      for (const [mKey, recMap] of Object.entries(backupPayments)) {
+        mergedPayments[mKey] = {};
+        for (const [bCode, rec] of Object.entries(recMap || {})) {
+          if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
+            mergedPayments[mKey][bCode] = { ...rec };
+          }
+        }
+      }
     }
+
+    // Merge legacy payments (excluding deleted)
+    for (const [mKey, recMap] of Object.entries(normalizedLegacyPayments)) {
+      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
+      for (const [bCode, rec] of Object.entries(recMap || {})) {
+        if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
+          mergedPayments[mKey][bCode] = { ...rec };
+        }
+      }
+    }
+
+    // Merge primary parsed payments (excluding deleted)
     for (const [mKey, recMap] of Object.entries(normalizedPrimaryPayments)) {
-      mergedPayments[mKey] = {
-        ...(mergedPayments[mKey] || {}),
-        ...recMap,
-      };
+      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
+      for (const [bCode, rec] of Object.entries(recMap || {})) {
+        if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
+          mergedPayments[mKey][bCode] = { ...rec };
+        }
+      }
+    }
+
+    // Clean up empty months
+    for (const mKey of Object.keys(mergedPayments)) {
+      if (Object.keys(mergedPayments[mKey]).length === 0) {
+        delete mergedPayments[mKey];
+      }
     }
 
     const todayKey = getTodayKey();
@@ -520,6 +549,7 @@ export function loadLocalData(): SystemData {
       pendingWhatsAppMessages: Array.isArray(parsed.pendingWhatsAppMessages) ? parsed.pendingWhatsAppMessages : [],
       gradeWhatsAppLinks: { ...backupLinks, ...(parsed.gradeWhatsAppLinks || {}) },
       deletedBarcodes: Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [],
+      deletedPaymentKeys: Array.isArray(parsed.deletedPaymentKeys) ? parsed.deletedPaymentKeys : [],
       scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
       updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),
     };
@@ -1058,6 +1088,24 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   );
   const deletedSet = new Set(deletedBarcodes);
 
+  // Union of deleted payment keys ("monthKey:barcode") to prevent cancelled payments from resurrecting
+  const deletedPaymentKeys = Array.from(
+    new Set([
+      ...(Array.isArray(local.deletedPaymentKeys) ? local.deletedPaymentKeys : []),
+      ...(Array.isArray(cloud.deletedPaymentKeys) ? cloud.deletedPaymentKeys : []),
+    ])
+  );
+  const deletedPaymentSet = new Set(deletedPaymentKeys);
+
+  // Union of deleted attendance keys ("dateKey:barcode") to prevent cancelled/deleted attendance from resurrecting
+  const deletedAttendanceKeys = Array.from(
+    new Set([
+      ...(Array.isArray(local.deletedAttendanceKeys) ? local.deletedAttendanceKeys : []),
+      ...(Array.isArray(cloud.deletedAttendanceKeys) ? cloud.deletedAttendanceKeys : []),
+    ])
+  );
+  const deletedAttSet = new Set(deletedAttendanceKeys);
+
   // 1. Merge Students (keyed by barcode and normalized name)
   const studentMap = new Map<string, Student>();
   const nameToBarcodeMap = new Map<string, string>();
@@ -1103,48 +1151,34 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
           nameToBarcodeMap.set(nameKey, bKey);
         }
       } else {
-        // Merge student properties intelligently with CRDT union rules
-        const localScores = Array.isArray(existing.totalExamScores) ? existing.totalExamScores : [];
-        const remoteScores = Array.isArray(remoteStudent.totalExamScores) ? remoteStudent.totalExamScores : [];
-        const mergedScores = Array.from(new Set([...localScores, ...remoteScores]));
+        // Merge student properties intelligently with CRDT timestamp rules
+        const localStudentTime = parseTimestamp(existing.updatedAt || localTime);
+        const remoteStudentTime = parseTimestamp(remoteStudent.updatedAt || cloudTime);
+        const isRemoteNewer = remoteStudentTime > localStudentTime;
 
-        const points = Math.max(existing.points || 0, remoteStudent.points || 0);
-        const totalAttendanceDays = Math.max(existing.totalAttendanceDays || 0, remoteStudent.totalAttendanceDays || 0);
-        const totalAbsentDays = Math.max(existing.totalAbsentDays || 0, remoteStudent.totalAbsentDays || 0);
-
-        const isCloudNewer = cloudTime > localTime;
-        const baseStudent = isCloudNewer ? { ...existing, ...remoteStudent } : { ...remoteStudent, ...existing };
-        const phone = (isCloudNewer ? remoteStudent.phone : existing.phone) || remoteStudent.phone || existing.phone || "";
-        const parentPhone = (isCloudNewer ? remoteStudent.parentPhone : existing.parentPhone) || remoteStudent.parentPhone || existing.parentPhone || "";
-        const notes = (isCloudNewer ? remoteStudent.notes : existing.notes) || remoteStudent.notes || existing.notes || "";
-        const groupDays = (isCloudNewer ? remoteStudent.groupDays : existing.groupDays) || remoteStudent.groupDays || existing.groupDays;
-        const discountReason = (isCloudNewer ? remoteStudent.discountReason : existing.discountReason) || remoteStudent.discountReason || existing.discountReason;
-        const customMonthlyFee = isCloudNewer
-          ? (remoteStudent.customMonthlyFee !== undefined ? remoteStudent.customMonthlyFee : existing.customMonthlyFee)
-          : (existing.customMonthlyFee !== undefined ? existing.customMonthlyFee : remoteStudent.customMonthlyFee);
-        const name = (isCloudNewer ? remoteStudent.name : existing.name) || remoteStudent.name || existing.name;
-        const groupGrade = (isCloudNewer ? remoteStudent.groupGrade : existing.groupGrade) || remoteStudent.groupGrade || existing.groupGrade;
-
-        const lastExamTitle = (localTime >= cloudTime ? existing.lastExamTitle : remoteStudent.lastExamTitle) || existing.lastExamTitle || remoteStudent.lastExamTitle || "";
-        const lastExamScore = (localTime >= cloudTime ? existing.lastExamScore : remoteStudent.lastExamScore) || existing.lastExamScore || remoteStudent.lastExamScore || "";
+        // The newer record is primary and authoritative
+        const primary = isRemoteNewer ? remoteStudent : existing;
+        const secondary = isRemoteNewer ? existing : remoteStudent;
 
         studentMap.set(existingKey, {
-          ...baseStudent,
-          name,
-          groupGrade,
+          ...secondary,
+          ...primary,
+          name: primary.name || secondary.name,
+          groupGrade: primary.groupGrade || secondary.groupGrade,
           barcode: existing.barcode || remoteStudent.barcode,
-          phone,
-          parentPhone,
-          notes,
-          groupDays,
-          discountReason,
-          customMonthlyFee,
-          points,
-          totalAttendanceDays,
-          totalAbsentDays,
-          totalExamScores: mergedScores.length > 0 ? mergedScores : (localScores.length > 0 ? localScores : remoteScores),
-          lastExamTitle,
-          lastExamScore,
+          phone: primary.phone !== undefined ? primary.phone : (secondary.phone || ""),
+          parentPhone: primary.parentPhone !== undefined ? primary.parentPhone : (secondary.parentPhone || ""),
+          notes: primary.notes !== undefined ? primary.notes : (secondary.notes || ""),
+          groupDays: primary.groupDays || secondary.groupDays,
+          discountReason: primary.discountReason !== undefined ? primary.discountReason : (secondary.discountReason || ""),
+          customMonthlyFee: primary.customMonthlyFee !== undefined ? primary.customMonthlyFee : secondary.customMonthlyFee,
+          points: primary.points !== undefined ? primary.points : (secondary.points || 0),
+          totalAttendanceDays: primary.totalAttendanceDays !== undefined ? primary.totalAttendanceDays : (secondary.totalAttendanceDays || 0),
+          totalAbsentDays: primary.totalAbsentDays !== undefined ? primary.totalAbsentDays : (secondary.totalAbsentDays || 0),
+          totalExamScores: Array.isArray(primary.totalExamScores) ? primary.totalExamScores : (Array.isArray(secondary.totalExamScores) ? secondary.totalExamScores : []),
+          lastExamTitle: primary.lastExamTitle !== undefined ? primary.lastExamTitle : (secondary.lastExamTitle || ""),
+          lastExamScore: primary.lastExamScore !== undefined ? primary.lastExamScore : (secondary.lastExamScore || ""),
+          updatedAt: Math.max(localStudentTime, remoteStudentTime),
         });
       }
     });
@@ -1152,42 +1186,63 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
 
   const mergedStudents = Array.from(studentMap.values());
 
-  // 2. Merge Attendance History & Today
+  // 2. Merge Attendance History & Today with tombstone protection
   const mergedHistory: Record<string, Record<string, string>> = {};
 
-  if (local.attendanceHistory) {
-    for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
-      mergedHistory[dateKey] = { ...(dayMap || {}) };
-    }
-  }
-
-  if (cloud.attendanceHistory) {
-    for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-      if (!mergedHistory[dateKey]) {
+  if (localTime >= cloudTime) {
+    if (local.attendanceHistory) {
+      for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
         mergedHistory[dateKey] = {};
+        for (const [bCode, status] of Object.entries(dayMap || {})) {
+          if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+            mergedHistory[dateKey][bCode] = status;
+          }
+        }
       }
-      if (dateKey === todayKey) {
-        continue;
+    }
+    if (cloud.attendanceHistory) {
+      for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
+        if (!mergedHistory[dateKey]) {
+          mergedHistory[dateKey] = {};
+          for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
+            if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+              mergedHistory[dateKey][bCode] = status;
+            }
+          }
+        }
       }
-      for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
-        if (!mergedHistory[dateKey][bCode] || cloudTime > localTime) {
-          mergedHistory[dateKey][bCode] = status;
+    }
+  } else {
+    if (cloud.attendanceHistory) {
+      for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
+        mergedHistory[dateKey] = {};
+        for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
+          if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+            mergedHistory[dateKey][bCode] = status;
+          }
+        }
+      }
+    }
+    if (local.attendanceHistory) {
+      for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
+        if (!mergedHistory[dateKey]) {
+          mergedHistory[dateKey] = {};
+          for (const [bCode, status] of Object.entries(dayMap || {})) {
+            if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+              mergedHistory[dateKey][bCode] = status;
+            }
+          }
         }
       }
     }
   }
 
-  let mergedToday: Record<string, string>;
-  if (localTime >= cloudTime) {
-    mergedToday = {
-      ...(cloud.attendanceToday || {}),
-      ...(local.attendanceToday || {}),
-    };
-  } else {
-    mergedToday = {
-      ...(local.attendanceToday || {}),
-      ...(cloud.attendanceToday || {}),
-    };
+  let mergedToday: Record<string, string> = {};
+  const baseTodaySource = localTime >= cloudTime ? (local.attendanceToday || {}) : (cloud.attendanceToday || {});
+  for (const [bCode, status] of Object.entries(baseTodaySource)) {
+    if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
+      mergedToday[bCode] = status;
+    }
   }
 
   mergedHistory[todayKey] = {
@@ -1242,51 +1297,74 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     }
   });
 
-  // 4. Merge Payments (deep merge all months and all student records within each month)
+  // 4. Merge Payments (reconcile with authoritative latest timestamp & tombstones)
   const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
 
-  // First copy all local payments
-  if (local.payments) {
-    for (const [mKey, records] of Object.entries(local.payments)) {
-      mergedPayments[mKey] = { ...(records || {}) };
-    }
-  }
-
-  // Then union and deep merge all cloud payments from other devices
-  if (cloud.payments) {
+  if (cloudTime > localTime && cloud.payments) {
+    // Cloud is strictly newer: Cloud state is authoritative for any months it contains
     for (const [mKey, remoteRecords] of Object.entries(cloud.payments)) {
-      if (!mergedPayments[mKey]) {
-        mergedPayments[mKey] = {};
-      }
+      mergedPayments[mKey] = {};
       if (remoteRecords && typeof remoteRecords === "object") {
         for (const [bCode, remoteRec] of Object.entries(remoteRecords)) {
-          if (!remoteRec) continue;
-          const localRec = mergedPayments[mKey][bCode];
-          if (!localRec) {
+          if (!remoteRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
+          if (Number(remoteRec.amount) > 0) {
             mergedPayments[mKey][bCode] = { ...remoteRec };
-          } else {
-            const localAmt = Number(localRec.amount) || 0;
-            const remoteAmt = Number(remoteRec.amount) || 0;
-            if (remoteAmt > 0 && localAmt === 0) {
-              mergedPayments[mKey][bCode] = { ...localRec, ...remoteRec };
-            } else if (localAmt > 0 && remoteAmt === 0) {
-              mergedPayments[mKey][bCode] = { ...remoteRec, ...localRec };
-            } else {
-              const chosen = remoteAmt > localAmt ? remoteRec : localRec;
-              const combinedNote = [localRec.note, remoteRec.note]
-                .filter(Boolean)
-                .filter((v, i, a) => a.indexOf(v) === i)
-                .join(" | ");
-              mergedPayments[mKey][bCode] = {
-                ...localRec,
-                ...remoteRec,
-                ...chosen,
-                note: combinedNote,
-              };
+          }
+        }
+      }
+    }
+    // Only preserve local months that don't exist in cloud at all (excluding deleted tombstones)
+    if (local.payments) {
+      for (const [mKey, records] of Object.entries(local.payments)) {
+        if (!cloud.payments[mKey]) {
+          mergedPayments[mKey] = {};
+          for (const [bCode, localRec] of Object.entries(records || {})) {
+            if (!localRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
+            if (Number(localRec.amount) > 0) {
+              mergedPayments[mKey][bCode] = { ...localRec };
             }
           }
         }
       }
+    }
+  } else {
+    // Local is newer or equal: local payments are base
+    if (local.payments) {
+      for (const [mKey, records] of Object.entries(local.payments)) {
+        mergedPayments[mKey] = {};
+        for (const [bCode, rec] of Object.entries(records || {})) {
+          if (!rec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
+          if (Number(rec.amount) > 0) {
+            mergedPayments[mKey][bCode] = { ...rec };
+          }
+        }
+      }
+    }
+    // Deep union any missing non-deleted cloud payment records
+    if (cloud.payments) {
+      for (const [mKey, remoteRecords] of Object.entries(cloud.payments)) {
+        if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
+        if (remoteRecords && typeof remoteRecords === "object") {
+          for (const [bCode, remoteRec] of Object.entries(remoteRecords)) {
+            if (!remoteRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
+            if (!mergedPayments[mKey][bCode] && Number(remoteRec.amount) > 0) {
+              mergedPayments[mKey][bCode] = { ...remoteRec };
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Purge any deleted payments or zero-amount payments and clean empty months
+  for (const mKey of Object.keys(mergedPayments)) {
+    for (const bCode of Object.keys(mergedPayments[mKey])) {
+      if (deletedPaymentSet.has(`${mKey}:${bCode}`) || Number(mergedPayments[mKey][bCode]?.amount) <= 0) {
+        delete mergedPayments[mKey][bCode];
+      }
+    }
+    if (Object.keys(mergedPayments[mKey]).length === 0) {
+      delete mergedPayments[mKey];
     }
   }
 
@@ -1380,6 +1458,8 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     pendingWhatsAppMessages: mergedWhatsApp,
     gradeWhatsAppLinks: mergedGradeWhatsAppLinks,
     deletedBarcodes,
+    deletedPaymentKeys,
+    deletedAttendanceKeys,
     scanLogUpdatedAt: Math.max(localScanTime, cloudScanTime),
     updatedAt: Math.max(localTime, cloudTime),
   };
@@ -2046,10 +2126,17 @@ if (typeof window !== "undefined") {
 
 export function saveStudentsData(students: Student[], deletedBarcode?: string): void {
   const current = loadLocalData();
-  const deletedBarcodes = [...(current.deletedBarcodes || [])];
+  let deletedBarcodes = [...(current.deletedBarcodes || [])];
   if (deletedBarcode && !deletedBarcodes.includes(deletedBarcode)) {
     deletedBarcodes.push(deletedBarcode);
   }
+  // Remove any active student barcodes from deletedBarcodes (in case a student was re-added)
+  const activeBarcodes = new Set(students.map((s) => String(s.barcode).trim()));
+  deletedBarcodes = deletedBarcodes.filter((b) => !activeBarcodes.has(String(b).trim()));
+  if (deletedBarcode && !deletedBarcodes.includes(deletedBarcode)) {
+    deletedBarcodes.push(deletedBarcode);
+  }
+
   const updated: SystemData = {
     ...current,
     students,
@@ -2129,11 +2216,27 @@ export function saveAttendanceAndStudentsBatch(
   scanLogTimes: Record<string, string>,
   students: Student[],
   immediateSync: boolean = false,
-  deferCloudSyncUntilGroupFinished: boolean = false
+  deferCloudSyncUntilGroupFinished: boolean = false,
+  deletedAttendanceKey?: string
 ): void {
   const current = loadLocalData();
   const todayKey = getTodayKey();
   const now = Date.now();
+
+  const deletedAttendanceKeys = [...(current.deletedAttendanceKeys || [])];
+  if (deletedAttendanceKey && !deletedAttendanceKeys.includes(deletedAttendanceKey)) {
+    deletedAttendanceKeys.push(deletedAttendanceKey);
+  }
+  // Clear any active barcodes for today from deletedAttendanceKeys
+  const cleanDeletedKeys = deletedAttendanceKeys.filter((k) => {
+    const [dKey, b] = k.split(":");
+    if (dKey === todayKey && attendanceToday[b]) return false;
+    return true;
+  });
+  if (deletedAttendanceKey && !cleanDeletedKeys.includes(deletedAttendanceKey)) {
+    cleanDeletedKeys.push(deletedAttendanceKey);
+  }
+
   const updated: SystemData = {
     ...current,
     students,
@@ -2144,6 +2247,7 @@ export function saveAttendanceAndStudentsBatch(
     },
     scanLogOrder,
     scanLogTimes,
+    deletedAttendanceKeys: cleanDeletedKeys,
     scanLogUpdatedAt: now,
     updatedAt: now,
   };
@@ -2188,16 +2292,33 @@ export function saveAttendanceAndStudentsBatch(
  */
 export function saveAttendanceHistoryData(
   attendanceHistory: Record<string, Record<string, string>>,
-  students?: Student[]
+  students?: Student[],
+  deletedAttendanceKey?: string
 ): void {
   const current = loadLocalData();
   const todayKey = getTodayKey();
   const now = Date.now();
+
+  const deletedAttendanceKeys = [...(current.deletedAttendanceKeys || [])];
+  if (deletedAttendanceKey && !deletedAttendanceKeys.includes(deletedAttendanceKey)) {
+    deletedAttendanceKeys.push(deletedAttendanceKey);
+  }
+  // Clear any active records from deleted keys
+  const cleanDeletedKeys = deletedAttendanceKeys.filter((k) => {
+    const [dKey, b] = k.split(":");
+    if (attendanceHistory[dKey]?.[b]) return false;
+    return true;
+  });
+  if (deletedAttendanceKey && !cleanDeletedKeys.includes(deletedAttendanceKey)) {
+    cleanDeletedKeys.push(deletedAttendanceKey);
+  }
+
   const updated: SystemData = {
     ...current,
     attendanceHistory,
     attendanceToday: attendanceHistory[todayKey] || current.attendanceToday || {},
     students: students !== undefined ? students : current.students,
+    deletedAttendanceKeys: cleanDeletedKeys,
     updatedAt: now,
   };
   syncDataToCloud(updated, true);
@@ -2276,10 +2397,53 @@ export function saveScanLogData(
   syncDataToCloud(updated, true);
 }
 
-export function savePaymentsData(payments: Record<string, Record<string, PaymentRecord>>): void {
+export function savePaymentsData(
+  payments: Record<string, Record<string, PaymentRecord>>,
+  deletedKey?: string // e.g. `${monthKey}:${barcode}`
+): void {
   const current = loadLocalData();
-  const updated: SystemData = { ...current, payments, updatedAt: Date.now() };
+  const deletedPaymentKeys = [...(current.deletedPaymentKeys || [])];
+  if (deletedKey && !deletedPaymentKeys.includes(deletedKey)) {
+    deletedPaymentKeys.push(deletedKey);
+  }
+
+  // Remove any active paid keys from deletedPaymentKeys so re-paying works
+  const activeKeys = new Set<string>();
+  for (const [mKey, map] of Object.entries(payments || {})) {
+    for (const bCode of Object.keys(map || {})) {
+      if (map[bCode] && Number(map[bCode].amount) > 0) {
+        activeKeys.add(`${mKey}:${bCode}`);
+      }
+    }
+  }
+  const cleanDeletedKeys = deletedPaymentKeys.filter((k) => !activeKeys.has(k));
+  if (deletedKey && !cleanDeletedKeys.includes(deletedKey)) {
+    cleanDeletedKeys.push(deletedKey);
+  }
+
+  const updated: SystemData = {
+    ...current,
+    payments,
+    deletedPaymentKeys: cleanDeletedKeys,
+    updatedAt: Date.now(),
+  };
   syncDataToCloud(updated, true);
+}
+
+export function deletePaymentRecord(monthKey: string, barcode: string): Record<string, Record<string, PaymentRecord>> {
+  const current = loadLocalData();
+  const payments = { ...(current.payments || {}) };
+  if (payments[monthKey]) {
+    const monthCopy = { ...payments[monthKey] };
+    delete monthCopy[barcode];
+    if (Object.keys(monthCopy).length === 0) {
+      delete payments[monthKey];
+    } else {
+      payments[monthKey] = monthCopy;
+    }
+  }
+  savePaymentsData(payments, `${monthKey}:${barcode}`);
+  return payments;
 }
 
 export function saveGroupPricesData(groupPrices: Record<GradeName, number>): void {

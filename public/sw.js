@@ -1,10 +1,11 @@
 // Service Worker for Offline & Online PWA Caching
-const CACHE_NAME = "math-center-v4.0";
+const CACHE_NAME = "math-center-v5.0";
 const ASSETS_TO_CACHE = [
   "/",
   "/index.html",
   "/manifest.json",
-  "/icon.svg"
+  "/icon.svg",
+  "/notification.wav"
 ];
 
 // Install Event: Cache critical app shell
@@ -106,6 +107,7 @@ self.addEventListener("push", (event) => {
     icon: data.icon || "/icon.svg",
     badge: data.badge || "/icon.svg",
     vibrate: [500, 200, 500, 200, 800], // Strong high-priority vibration pattern
+    sound: "/notification.wav", // Custom audio chime
     silent: false, // Rings device's notification ringtone
     renotify: true, // Alerts phone sound even if prior notification is in tray
     requireInteraction: true,
@@ -128,12 +130,15 @@ self.addEventListener("push", (event) => {
     lang: "ar"
   };
 
-  // Broadcast to open clients so they can immediately mark event as processed
+  // Broadcast to open clients so they can immediately mark event as processed and play acoustic chime
   const notifyClients = self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
     clientList.forEach((client) => {
       client.postMessage({
         type: "PUSH_RECEIVED",
         eventId: data.eventId,
+        notifType: data.type || "alert",
+        title: data.title,
+        body: data.body,
       });
     });
   });
