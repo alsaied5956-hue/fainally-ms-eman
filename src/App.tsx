@@ -1143,7 +1143,7 @@ export default function App() {
   // If Portal Mode is active, render the dedicated Parents & Admins Portal
   if (appViewMode === "portal") {
     return (
-      <div dir="rtl">
+      <div dir="rtl" className="min-h-screen w-full overflow-y-auto bg-[#050711]">
         <PortalMasterApp
           students={students}
           attendanceToday={attendanceToday}
@@ -1282,7 +1282,7 @@ export default function App() {
             {/* Tab Body View Container with dedicated independent scrolling */}
             <main
               ref={mainScrollRef}
-              className="flex-1 overflow-y-auto h-full p-3 md:p-6 lg:p-8 max-w-full min-w-0 custom-scrollbar relative"
+              className="flex-1 overflow-y-auto min-h-0 h-full p-3 md:p-6 lg:p-8 max-w-full min-w-0 custom-scrollbar relative"
             >
               <div className="max-w-7xl mx-auto w-full min-w-0 pb-16">
                 {activeTab === "attendance-scan" && (

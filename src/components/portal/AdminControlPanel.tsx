@@ -780,9 +780,9 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
             </div>
 
             {/* Accounts Table */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto">
+            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto max-h-[72vh] overflow-y-auto custom-scrollbar">
               <table className="w-full text-right text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-md">
                   <tr className="border-b border-slate-800 text-slate-400 font-bold">
                     <th className="py-3 px-3">كود الطالب</th>
                     <th className="py-3 px-3">اسم الطالب والصف</th>
@@ -1287,8 +1287,8 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
       {/* MODAL 1: EDIT CREDENTIALS */}
       {editingAccount && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/30 p-6 shadow-2xl space-y-4 text-right">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/30 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-base font-bold text-white font-fancy">
@@ -1378,8 +1378,8 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
       {/* MODAL 2: DIRECT SINGLE STUDENT ACTIVATION */}
       {activatingItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-emerald-500/40 p-6 shadow-2xl space-y-4 text-right">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-emerald-500/40 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
@@ -1475,8 +1475,8 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
       {/* MODAL 3: BATCH ACTIVATION FOR ALL UNACTIVATED STUDENTS */}
       {showBatchModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-emerald-500/40 p-6 shadow-2xl space-y-4 text-right">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-emerald-500/40 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">

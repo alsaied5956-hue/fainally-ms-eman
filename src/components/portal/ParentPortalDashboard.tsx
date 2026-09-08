@@ -1430,8 +1430,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
       {/* MODAL: ADD / LINK ANOTHER CHILD */}
       {showAddChildModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border border-amber-500/30 p-6 shadow-2xl space-y-4 text-right">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border border-amber-500/30 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-white font-fancy">
                 ربط ابن آخر بحسابك

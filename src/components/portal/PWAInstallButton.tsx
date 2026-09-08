@@ -68,8 +68,8 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
 
       {/* iOS Installation Guide Modal */}
       {showIOSGuide && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-slate-900 to-slate-950 border border-amber-500/30 p-6 shadow-2xl text-right">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-slate-900 to-slate-950 border border-amber-500/30 p-6 shadow-2xl text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <button
               onClick={() => setShowIOSGuide(false)}
               className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition"
@@ -126,8 +126,8 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
 
       {/* Desktop / Manual Guide Modal */}
       {showDesktopGuide && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/30 p-6 shadow-2xl text-right">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/30 p-6 shadow-2xl text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <button
               onClick={() => setShowDesktopGuide(false)}
               className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition"

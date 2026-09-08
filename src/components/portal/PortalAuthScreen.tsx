@@ -108,7 +108,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
   };
 
   return (
-    <div className="min-h-screen flex flex-col justify-between bg-gradient-to-br from-[#060812] via-[#090d1f] to-[#04060c] text-slate-100 p-4 sm:p-6 md:p-8 font-tajawal relative overflow-hidden">
+    <div className="min-h-screen flex flex-col justify-between bg-gradient-to-br from-[#060812] via-[#090d1f] to-[#04060c] text-slate-100 p-4 sm:p-6 md:p-8 font-tajawal relative overflow-y-auto">
       {/* Background ambient lighting */}
       <div className="absolute top-0 right-1/4 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-0 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />

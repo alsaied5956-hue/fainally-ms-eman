@@ -38,13 +38,26 @@
 }
 
 /* High-Performance Clean Ambient Styling */
-html, body {
+html {
   background-color: #050711;
   font-family: 'Readex Pro', 'Cairo', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overflow: hidden;
-  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  background-color: #050711;
+  font-family: 'Readex Pro', 'Cairo', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+#root {
+  min-height: 100%;
 }
 
 * {
@@ -53,8 +66,6 @@ html, body {
 
 main, aside, .custom-scrollbar {
   -webkit-overflow-scrolling: touch;
-  scroll-behavior: auto !important;
-  will-change: scroll-position;
 }
 
 button, [role="button"], a {
