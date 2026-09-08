@@ -30,6 +30,7 @@ import {
 } from "../../utils/helpers";
 import { printElement } from "../../utils/print";
 import { PWAInstallButton } from "./PWAInstallButton";
+import { NotificationPermissionModal } from "./NotificationPermissionModal";
 import {
   User,
   Users,
@@ -169,6 +170,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     return isNotificationSupported() && Notification.permission === "granted";
   });
 
+  // Mandatory Notification Onboarding Modal (pops up at runtime if permission is not granted)
+  const [showNotifModal, setShowNotifModal] = useState<boolean>(() => {
+    if (typeof window === "undefined" || !isNotificationSupported()) return false;
+    const dismissed = sessionStorage.getItem("eman_notif_modal_dismissed");
+    return Notification.permission !== "granted" && dismissed !== "true";
+  });
+
   // All linked student barcodes (primary + linked)
   const allChildBarcodes = useMemo(() => {
     return Array.from(new Set([account.studentBarcode, ...(account.linkedBarcodes || [])]));
@@ -246,8 +254,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     }
   }, [activeStudent.barcode, account.parentPhone, account.studentBarcode, account.linkedBarcodes]);
 
-  // Request push notification permission
-  const handleEnableNotifications = async () => {
+  // Request push notification permission from modal
+  const handleRequestPermissionFromModal = async (): Promise<NotificationPermission> => {
     const allAliases = Array.from(
       new Set([
         account.studentBarcode,
@@ -263,13 +271,19 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     const perm = await requestNotificationPermission(targetId, "parent", allAliases);
     if (perm === "granted") {
       setHasNotifPerm(true);
-      await sendPortalNotification(
-        "منظومة الأستاذة إيمان الدمشيتي",
-        `تم تفعيل الإشعارات المباشرة بنجاح لمتابعة الطالب (${activeStudent.name}) حتى والتطبيق مغلق!`,
-        "grade",
-        { force: true }
-      );
+      sessionStorage.removeItem("eman_notif_modal_dismissed");
     }
+    return perm;
+  };
+
+  const handleCloseNotifModal = () => {
+    setShowNotifModal(false);
+    sessionStorage.setItem("eman_notif_modal_dismissed", "true");
+  };
+
+  // Request push notification permission / open onboarding modal
+  const handleEnableNotifications = () => {
+    setShowNotifModal(true);
   };
 
   // Pre-seed and silence historical records on initial session startup
@@ -872,6 +886,17 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   return (
     <div className="min-h-screen bg-[#060812] text-slate-100 font-tajawal selection:bg-amber-500 selection:text-black">
+      {/* MANDATORY / ESSENTIAL NOTIFICATION SETUP MODAL AT STARTUP */}
+      <NotificationPermissionModal
+        isOpen={showNotifModal && !hasNotifPerm && isNotificationSupported()}
+        studentName={activeStudent.name}
+        onClose={handleCloseNotifModal}
+        onPermissionGranted={() => {
+          setHasNotifPerm(true);
+        }}
+        onRequestPermission={handleRequestPermissionFromModal}
+      />
+
       {/* TOP PORTAL NAVIGATION BAR */}
       <header className="sticky top-0 z-40 bg-slate-900/95 border-b border-amber-500/25 backdrop-blur-md px-4 sm:px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
