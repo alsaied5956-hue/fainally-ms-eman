@@ -3,6 +3,12 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import webpush from "web-push";
+import { initializeApp, getApps } from "firebase/app";
+import { getFirestore, collection, getDocs, deleteDoc, doc, setDoc } from "firebase/firestore";
+import firebaseConfig from "./firebase-applet-config.json";
+
+const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const db = getFirestore(fbApp, (firebaseConfig as any).firestoreDatabaseId || undefined);
 
 const app = express();
 const PORT = 3000;
@@ -84,7 +90,39 @@ function persistStoredSubscriptions(): void {
   }
 }
 
+async function syncSubscriptionsFromFirestore(): Promise<void> {
+  try {
+    const snap = await getDocs(collection(db, "push_subscriptions"));
+    let count = 0;
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data.endpoint && data.p256dh && data.auth) {
+        subscriptionsCache.set(data.endpoint, {
+          userId: String(data.userId || "guest").trim(),
+          aliases: Array.isArray(data.aliases) ? data.aliases.map(String) : [],
+          userRole: data.userRole || "parent",
+          endpoint: data.endpoint,
+          keys: {
+            p256dh: data.p256dh,
+            auth: data.auth,
+          },
+          userAgent: data.userAgent || "",
+          updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now(),
+        });
+        count++;
+      }
+    });
+    if (count > 0) {
+      console.log(`[Push] Synced ${count} subscriptions from Firestore. Total active: ${subscriptionsCache.size}`);
+      persistStoredSubscriptions();
+    }
+  } catch (err) {
+    console.warn("[Push] Error syncing from Firestore:", err);
+  }
+}
+
 loadStoredSubscriptions();
+syncSubscriptionsFromFirestore().catch(() => {});
 
 // ----------------------------------------------------
 // API ROUTES
@@ -129,6 +167,21 @@ app.post("/api/push-subscribe", (req, res) => {
     subscriptionsCache.set(subscription.endpoint, stored);
     persistStoredSubscriptions();
 
+    // Persist to Firestore collection push_subscriptions
+    try {
+      const cleanDocId = encodeURIComponent(subscription.endpoint).slice(-80);
+      setDoc(doc(db, "push_subscriptions", cleanDocId), {
+        userId: stored.userId,
+        aliases: stored.aliases,
+        userRole: stored.userRole,
+        endpoint: stored.endpoint,
+        p256dh: stored.keys.p256dh,
+        auth: stored.keys.auth,
+        userAgent: stored.userAgent,
+        updatedAt: new Date(),
+      }, { merge: true }).catch(() => {});
+    } catch {}
+
     console.log(`[Push] Registered subscription for user ${cleanUserId} (aliases: ${cleanAliases.length}). Total: ${subscriptionsCache.size}`);
     return res.json({ success: true, count: subscriptionsCache.size });
   } catch (err: any) {
@@ -152,6 +205,9 @@ app.post("/api/send-push", async (req, res) => {
       eventId,
       type,
     } = req.body;
+
+    // Dynamically sync subscriptions from Firestore before checking targets
+    await syncSubscriptionsFromFirestore();
 
     if (!title || !body) {
       return res.status(400).json({ error: "title and body are required" });
@@ -250,9 +306,15 @@ app.post("/api/send-push", async (req, res) => {
       })
     );
 
-    // Clean up dead subscriptions
+    // Clean up dead subscriptions (e.g. uninstalled or expired)
     if (deadEndpoints.length > 0) {
-      deadEndpoints.forEach((ep) => subscriptionsCache.delete(ep));
+      deadEndpoints.forEach((ep) => {
+        subscriptionsCache.delete(ep);
+        try {
+          const cleanDocId = encodeURIComponent(ep).slice(-80);
+          deleteDoc(doc(db, "push_subscriptions", cleanDocId)).catch(() => {});
+        } catch {}
+      });
       persistStoredSubscriptions();
     }
 
