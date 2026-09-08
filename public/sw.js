@@ -99,22 +99,28 @@ self.addEventListener("push", (event) => {
   }
 
   const notifTag = data.tag || data.eventId || `eman-push-${Date.now()}`;
+  const isChat = data.type === "chat" || String(notifTag).includes("chat");
 
   const options = {
     body: data.body,
     icon: data.icon || "/icon.svg",
     badge: data.badge || "/icon.svg",
-    vibrate: [300, 100, 300, 100, 400], // High-energy vibration pattern for phones
-    silent: false, // Rings device's default notification ringtone
-    renotify: true, // Alerts phone sound even if prior notification is still in tray
+    vibrate: [500, 200, 500, 200, 800], // Strong high-priority vibration pattern
+    silent: false, // Rings device's notification ringtone
+    renotify: true, // Alerts phone sound even if prior notification is in tray
     requireInteraction: true,
     tag: notifTag,
-    actions: [
-      { action: "open_portal", title: "عرض المنظومة" },
-      { action: "view_attendance", title: "سجل الحضور" }
-    ],
+    actions: isChat
+      ? [
+          { action: "open_chat", title: "💬 فتح المحادثة" },
+          { action: "open_portal", title: "عرض المنظومة" }
+        ]
+      : [
+          { action: "open_portal", title: "عرض المنظومة" },
+          { action: "view_attendance", title: "سجل الحضور" }
+        ],
     data: {
-      url: data.url || "/",
+      url: isChat ? "/?tab=chat" : (data.url || "/"),
       eventId: data.eventId,
       timestamp: data.timestamp || Date.now()
     },
@@ -190,7 +196,9 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   let targetUrl = event.notification.data?.url || "/";
 
-  if (event.action === "view_attendance") {
+  if (event.action === "open_chat") {
+    targetUrl = "/?tab=chat";
+  } else if (event.action === "view_attendance") {
     targetUrl = "/?tab=attendance";
   }
 
