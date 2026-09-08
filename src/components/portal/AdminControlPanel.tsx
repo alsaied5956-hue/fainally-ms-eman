@@ -16,10 +16,12 @@ import {
   sendParentChatMessage,
   markChatThreadRead,
   subscribeToThreadChat,
+  subscribeToAllChats,
   syncParentAccountsFromCloud,
   activateParentAccountDirectly,
   batchActivateParentAccounts,
 } from "../../utils/portalStorage";
+import { openWhatsApp } from "../../utils/helpers";
 import {
   sendPortalNotification,
   playPortalAudioChime,
@@ -59,6 +61,10 @@ import {
   RotateCcw,
   GraduationCap,
   RefreshCw,
+  ArrowRight,
+  CheckCheck,
+  MessageCircle,
+  X,
 } from "lucide-react";
 
 interface AdminControlPanelProps {
@@ -127,13 +133,16 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   const [soundEnabled, setSoundEnabled] = useState(adminSettings.soundAlertsEnabled);
   const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
 
-  // Messaging Center State
+  // Messaging Center State (WhatsApp-Style Direct Experience)
   const [selectedChatBarcode, setSelectedChatBarcode] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ParentChatMessage[]>([]);
   const [adminChatText, setAdminChatText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [chatSearch, setChatSearch] = useState("");
+  const [chatTabFilter, setChatTabFilter] = useState<"all" | "unread" | "active">("all");
+  const [allChats, setAllChats] = useState<Record<string, ParentChatMessage[]>>(() => getLocalChatMessages());
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
 
   // Live real-time action feedback for activate, disable, delete with remote logout notification
   const [liveActionFeedback, setLiveActionFeedback] = useState<string | null>(null);
@@ -264,17 +273,34 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     });
   }, [unifiedAccountsList, searchQuery, statusFilter, gradeFilter]);
 
+  // Realtime subscription for all chats across the system (WhatsApp-style instant updates)
+  useEffect(() => {
+    const unsub = subscribeToAllChats((updatedChats) => {
+      setAllChats(updatedChats);
+    });
+    return () => unsub();
+  }, []);
+
   // Realtime subscription for selected chat thread
   useEffect(() => {
-    if (!selectedChatBarcode) return;
+    if (!selectedChatBarcode) {
+      setChatMessages([]);
+      return;
+    }
 
     const unsub = subscribeToThreadChat(selectedChatBarcode, (msgs) => {
       setChatMessages(msgs);
       markChatThreadRead(selectedChatBarcode, "admin");
     });
 
+    // Auto-focus input when entering chat
+    const timer = setTimeout(() => {
+      chatInputRef.current?.focus();
+    }, 150);
+
     return () => {
       unsub();
+      clearTimeout(timer);
     };
   }, [selectedChatBarcode]);
 
@@ -285,17 +311,23 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     }
   }, [chatMessages, activeTab, selectedChatBarcode]);
 
-  // All chat threads summarized
-  const allChats = useMemo(() => {
-    return getLocalChatMessages();
-  }, [chatMessages, activeTab]);
+  // Total unread chat messages across all parents
+  const totalUnreadChatCount = useMemo(() => {
+    let count = 0;
+    Object.values(allChats).forEach((msgs) => {
+      if (Array.isArray(msgs)) {
+        count += msgs.filter((m: ParentChatMessage) => m.sender === "parent" && !m.isRead).length;
+      }
+    });
+    return count;
+  }, [allChats]);
 
+  // All chat threads summarized with strict WhatsApp-style sorting (Latest active on top)
   const chatThreadsSummary = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
-    // Use accounts or threads in allChats
     const barcodeSet = new Set([
-      ...unifiedAccountsList.map((a) => a.barcode),
       ...Object.keys(allChats),
+      ...unifiedAccountsList.map((a) => a.barcode),
     ]);
 
     return Array.from(barcodeSet)
@@ -309,24 +341,46 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
           barcode: bCode,
           studentName: student?.name || `طالب (${bCode})`,
           studentGrade: student?.groupGrade || "غير محدد",
+          parentPhone: student?.parentPhone || student?.phone || "",
           unreadCount,
           lastMsg,
         };
       })
       .filter((th) => {
+        // Quick tabs filtering
+        if (chatTabFilter === "unread" && th.unreadCount === 0) return false;
+        if (chatTabFilter === "active" && !th.lastMsg) return false;
+
         if (!q) return true;
         return (
           th.barcode.includes(q) ||
           th.studentName.toLowerCase().includes(q) ||
+          th.parentPhone.includes(q) ||
           (th.lastMsg?.text || "").toLowerCase().includes(q)
         );
       })
       .sort((a, b) => {
-        // Unread first, then by last message timestamp
-        if (a.unreadCount !== b.unreadCount) return b.unreadCount - a.unreadCount;
-        return (b.lastMsg?.timestamp || 0) - (a.lastMsg?.timestamp || 0);
+        const timeA = a.lastMsg?.timestamp || 0;
+        const timeB = b.lastMsg?.timestamp || 0;
+
+        // 1. WhatsApp Priority: Newest message at the very top (highest timestamp first)
+        if (timeA > 0 && timeB > 0) {
+          return timeB - timeA;
+        }
+
+        // 2. Active conversations with messages always appear before empty conversations
+        if (timeA > 0 && timeB === 0) return -1;
+        if (timeA === 0 && timeB > 0) return 1;
+
+        // 3. Unread messages come before read messages
+        if (a.unreadCount !== b.unreadCount) {
+          return b.unreadCount - a.unreadCount;
+        }
+
+        // 4. Alphabetical by student name
+        return a.studentName.localeCompare(b.studentName, "ar");
       });
-  }, [unifiedAccountsList, allChats, students, chatSearch]);
+  }, [unifiedAccountsList, allChats, students, chatSearch, chatTabFilter]);
 
   // Action: Open Activate Modal for Unactivated Student
   const handleOpenActivateModal = (item: {
@@ -549,7 +603,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     setTimeout(() => setSettingsFeedback(null), 3500);
   };
 
-  // Action: Send Admin Chat Message
+  // Action: Send Admin Chat Message (Instant 0ms Feedback + WhatsApp Top-Ranked Reorder)
   const handleSendAdminChat = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedChatBarcode || !adminChatText.trim() || isSending) return;
@@ -559,12 +613,26 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     setAdminChatText("");
 
     try {
-      await sendParentChatMessage(
+      const sentMsg = await sendParentChatMessage(
         selectedChatBarcode,
         "admin",
         "المشرف العام (أستاذة إيمان الدمشيتي)",
         text
       );
+
+      // Instant local append for seamless 0-lag chat experience
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === sentMsg.id)) return prev;
+        return [...prev, sentMsg];
+      });
+
+      // Update allChats to instantly bring this thread to top of WhatsApp list
+      setAllChats(getLocalChatMessages());
+
+      setTimeout(() => {
+        chatInputRef.current?.focus();
+        chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 50);
     } catch (err) {
       console.warn("Error sending admin chat:", err);
     } finally {
@@ -654,6 +722,11 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
           >
             <MessageSquare className="w-4 h-4" />
             <span>مركز المحادثات والتواصل</span>
+            {totalUnreadChatCount > 0 && (
+              <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold animate-pulse">
+                {totalUnreadChatCount}
+              </span>
+            )}
           </button>
 
           <button
@@ -1065,35 +1138,107 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
           </div>
         )}
 
-        {/* TAB 2: MESSAGING CENTER */}
+        {/* TAB 2: MESSAGING CENTER (WHATSAPP-STYLE DIRECT IMMERSIVE INTERFACE) */}
         {activeTab === "chats" && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fadeIn h-[620px]">
-            {/* Left: Chat Threads List */}
-            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 shadow-xl flex flex-col h-full">
-              <div className="mb-3 space-y-2">
-                <h3 className="text-sm font-bold text-white flex items-center justify-between">
-                  <span>محادثات أولياء الأمور</span>
-                  <span className="text-xs text-indigo-400 font-mono">
-                    {chatThreadsSummary.length} محادثة
-                  </span>
-                </h3>
+          <div className="bg-slate-900/95 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden h-[calc(100vh-190px)] min-h-[580px] max-h-[760px] flex animate-fadeIn relative">
+            {/* 1. LEFT PANE: THREADS CONVERSATION LIST (Visible on mobile when no chat is selected, and always visible on lg screens) */}
+            <div
+              className={`${
+                selectedChatBarcode ? "hidden lg:flex" : "flex"
+              } flex-col h-full w-full lg:w-80 xl:w-96 shrink-0 border-l border-slate-800 bg-slate-950/60`}
+            >
+              {/* Top Header of Threads List */}
+              <div className="p-3.5 sm:p-4 border-b border-slate-800 bg-slate-900/60 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center">
+                      <MessageSquare className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-xs sm:text-sm font-bold text-white">محادثات أولياء الأمور</h3>
+                      <p className="text-[10px] text-slate-400">تواصل مباشر ولحظي</p>
+                    </div>
+                  </div>
+                  {totalUnreadChatCount > 0 ? (
+                    <span className="px-2.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold animate-pulse">
+                      {totalUnreadChatCount} جديدة
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-indigo-400 font-mono">
+                      {chatThreadsSummary.length} محادثة
+                    </span>
+                  )}
+                </div>
+
+                {/* WhatsApp Search Bar */}
                 <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
                     value={chatSearch}
                     onChange={(e) => setChatSearch(e.target.value)}
-                    placeholder="بحث في المحادثات..."
-                    className="w-full pr-8 pl-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none"
+                    placeholder="بحث بالاسم أو الكود أو رقم الهاتف..."
+                    className="w-full pr-8 pl-8 py-2 rounded-xl bg-slate-900/90 border border-slate-700/80 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 transition"
                   />
+                  {chatSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setChatSearch("")}
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* WhatsApp Filter Chips */}
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setChatTabFilter("all")}
+                    className={`px-3 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer ${
+                      chatTabFilter === "all"
+                        ? "bg-indigo-600 text-white shadow-sm"
+                        : "bg-slate-800/80 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    الكل ({chatThreadsSummary.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChatTabFilter("unread")}
+                    className={`px-3 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1 ${
+                      chatTabFilter === "unread"
+                        ? "bg-rose-600 text-white shadow-sm"
+                        : "bg-slate-800/80 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <span>غير مقروءة</span>
+                    {totalUnreadChatCount > 0 && (
+                      <span className="w-2 h-2 rounded-full bg-rose-400 animate-ping" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChatTabFilter("active")}
+                    className={`px-3 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer ${
+                      chatTabFilter === "active"
+                        ? "bg-emerald-600 text-white shadow-sm"
+                        : "bg-slate-800/80 text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    النشطة
+                  </button>
                 </div>
               </div>
 
-              {/* Thread list */}
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {/* Scrollable Threads List with WhatsApp-Style Avatars and Preview */}
+              <div className="flex-1 overflow-y-auto divide-y divide-slate-800/50">
                 {chatThreadsSummary.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-slate-400">
-                    لا توجد محادثات نشطة حالياً.
+                  <div className="p-8 text-center text-xs text-slate-400 space-y-2">
+                    <MessageSquare className="w-8 h-8 mx-auto text-slate-600" />
+                    <p className="font-bold text-white">لا توجد محادثات مطابقة</p>
+                    <p className="text-[11px] text-slate-500">جرب البحث بكود أو اسم مختلف</p>
                   </div>
                 ) : (
                   chatThreadsSummary.map((thread) => {
@@ -1103,35 +1248,71 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                         key={thread.barcode}
                         type="button"
                         onClick={() => setSelectedChatBarcode(thread.barcode)}
-                        className={`w-full p-3 rounded-2xl border text-right transition cursor-pointer flex flex-col gap-1 ${
+                        className={`w-full p-3 text-right transition cursor-pointer flex items-center gap-3 relative group ${
                           isSelected
-                            ? "bg-indigo-600/20 border-indigo-500/50"
-                            : "bg-slate-950/60 border-slate-800 hover:bg-slate-800/40"
+                            ? "bg-indigo-600/20 border-r-4 border-indigo-500"
+                            : "hover:bg-slate-900/80"
                         }`}
                       >
-                        <div className="flex items-center justify-between">
-                          <div className="font-bold text-white text-xs flex items-center gap-1.5">
-                            <span>{thread.studentName}</span>
-                            <span className="text-[10px] text-slate-400 font-mono">
-                              ({thread.barcode})
-                            </span>
+                        {/* Avatar with Status indicator */}
+                        <div className="relative shrink-0">
+                          <div
+                            className={`w-11 h-11 rounded-2xl flex items-center justify-center font-bold text-xs shadow-md ${
+                              thread.unreadCount > 0
+                                ? "bg-gradient-to-br from-rose-500 to-amber-600 text-white ring-2 ring-rose-500/40"
+                                : "bg-gradient-to-br from-indigo-600 to-slate-800 text-indigo-200"
+                            }`}
+                          >
+                            {thread.studentName.slice(0, 2)}
                           </div>
                           {thread.unreadCount > 0 && (
-                            <span className="px-2 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold">
-                              {thread.unreadCount} جديدة
-                            </span>
+                            <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-rose-500 rounded-full border-2 border-slate-950 animate-pulse" />
                           )}
                         </div>
 
-                        <p className="text-[11px] text-slate-400 truncate">
-                          {thread.lastMsg ? thread.lastMsg.text : "بدء محادثة جديدة..."}
-                        </p>
+                        {/* Middle Text: Name & Last Message snippet */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1 mb-0.5">
+                            <h4 className="font-bold text-white text-xs truncate">
+                              {thread.studentName}
+                            </h4>
+                            {thread.lastMsg && (
+                              <span className="text-[10px] text-slate-400 font-mono shrink-0">
+                                {thread.lastMsg.timeFormatted}
+                              </span>
+                            )}
+                          </div>
 
-                        {thread.lastMsg && (
-                          <span className="text-[9px] text-slate-500 font-mono self-end">
-                            {thread.lastMsg.timeFormatted}
-                          </span>
-                        )}
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[11px] text-slate-400 truncate flex items-center gap-1">
+                              {thread.lastMsg ? (
+                                <>
+                                  {thread.lastMsg.sender === "admin" && (
+                                    <CheckCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0 inline" />
+                                  )}
+                                  <span>{thread.lastMsg.text}</span>
+                                </>
+                              ) : (
+                                <span className="text-slate-500 italic">بدء محادثة جديدة...</span>
+                              )}
+                            </p>
+
+                            {thread.unreadCount > 0 && (
+                              <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-extrabold shrink-0 shadow">
+                                {thread.unreadCount}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400 font-mono">
+                              #{thread.barcode}
+                            </span>
+                            <span className="text-[9px] text-slate-400 truncate">
+                              {thread.studentGrade}
+                            </span>
+                          </div>
+                        </div>
                       </button>
                     );
                   })
@@ -1139,38 +1320,110 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
               </div>
             </div>
 
-            {/* Right: Active Chat Conversation */}
-            <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl flex flex-col h-full">
+            {/* 2. RIGHT PANE: ACTIVE CHAT CONVERSATION (Direct immersion on mobile, full side-by-side on lg) */}
+            <div
+              className={`${
+                !selectedChatBarcode ? "hidden lg:flex" : "flex"
+              } flex-col flex-1 h-full bg-slate-900/40 relative`}
+            >
               {selectedChatBarcode ? (
                 <>
-                  {/* Chat header */}
-                  <div className="pb-3 border-b border-slate-800 flex items-center justify-between">
-                    <div>
-                      <h3 className="text-sm font-bold text-white">
-                        محادثة مع ولي أمر الطالب:{" "}
-                        <strong className="text-amber-300">
-                          {students.find((s) => s.barcode === selectedChatBarcode)?.name || selectedChatBarcode}
-                        </strong>
-                      </h3>
-                      <p className="text-xs text-slate-400">
-                        كود الطالب: <span className="font-mono text-slate-300">{selectedChatBarcode}</span>
-                      </p>
-                    </div>
+                  {/* WhatsApp-Style Chat Top Bar with Back Button on Mobile */}
+                  {(() => {
+                    const activeStudent = students.find((s) => s.barcode === selectedChatBarcode);
+                    const studentPhone = activeStudent?.parentPhone || activeStudent?.phone || "";
+                    return (
+                      <div className="p-3 sm:p-4 border-b border-slate-800 bg-slate-900/90 flex items-center justify-between gap-3 shadow-md shrink-0">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {/* Back to Chats list button (Returns directly to list on Mobile) */}
+                          <button
+                            type="button"
+                            onClick={() => setSelectedChatBarcode(null)}
+                            title="العودة لقائمة المحادثات"
+                            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white transition flex items-center gap-1.5 text-xs font-bold shrink-0 cursor-pointer lg:hidden"
+                          >
+                            <ArrowRight className="w-4 h-4" />
+                            <span>المحادثات</span>
+                            {totalUnreadChatCount > 0 && (
+                              <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                            )}
+                          </button>
 
-                    <div className="flex items-center gap-1.5">
-                      <span className="px-2 py-1 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
-                        متصل الآن
-                      </span>
-                    </div>
-                  </div>
+                          {/* Avatar */}
+                          <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-600 to-purple-600 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow">
+                            {(activeStudent?.name || selectedChatBarcode).slice(0, 2)}
+                          </div>
 
-                  {/* Messages list */}
-                  <div className="flex-1 overflow-y-auto space-y-3 py-4 pr-1 pl-1">
+                          {/* Student & Parent Info */}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-xs sm:text-sm font-bold text-white truncate">
+                                {activeStudent?.name || `طالب (${selectedChatBarcode})`}
+                              </h3>
+                              <span className="hidden sm:inline-block px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
+                                متصل الآن
+                              </span>
+                            </div>
+                            <div className="text-[10px] sm:text-[11px] text-slate-400 flex items-center gap-2 truncate">
+                              <span className="font-mono text-indigo-300">كود: {selectedChatBarcode}</span>
+                              {activeStudent?.groupGrade && (
+                                <>
+                                  <span>•</span>
+                                  <span>{activeStudent.groupGrade}</span>
+                                </>
+                              )}
+                              {studentPhone && (
+                                <>
+                                  <span>•</span>
+                                  <span className="font-mono">{studentPhone}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Top Action Icons */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {studentPhone && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openWhatsApp(
+                                  studentPhone,
+                                  `أهلاً بحضرتك ولي أمر الطالب ${activeStudent?.name || ""}`
+                                )
+                              }
+                              title="فتح محادثة واتساب خارجية"
+                              className="px-2.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">واتساب</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setSelectedChatBarcode(null)}
+                            title="إغلاق المحادثة"
+                            className="hidden lg:flex p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Messages Bubble Stream */}
+                  <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 bg-[#080b16]/70">
                     {chatMessages.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 text-xs space-y-2">
-                        <MessageSquare className="w-8 h-8 text-slate-600" />
-                        <p>لا توجد رسائل سابقة في هذه المحادثة.</p>
-                        <p className="text-[11px] text-slate-500">أرسل رسالة ترحيبية لولي الأمر لبدء التواصل.</p>
+                      <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 text-xs space-y-2 py-12">
+                        <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 flex items-center justify-center">
+                          <MessageSquare className="w-6 h-6" />
+                        </div>
+                        <p className="font-bold text-white text-sm">بدء محادثة جديدة</p>
+                        <p className="text-[11px] text-slate-400 max-w-xs">
+                          لا توجد رسائل سابقة. أرسل رسالة لولي الأمر لبدء التواصل والمتابعة فورياً.
+                        </p>
                       </div>
                     ) : (
                       chatMessages.map((msg) => {
@@ -1181,18 +1434,24 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                             className={`flex flex-col ${isAdmin ? "items-end" : "items-start"}`}
                           >
                             <div
-                              className={`max-w-[85%] rounded-3xl p-3.5 text-xs shadow-md leading-relaxed ${
+                              className={`max-w-[88%] sm:max-w-[75%] rounded-3xl p-3 sm:p-3.5 text-xs shadow-md leading-relaxed ${
                                 isAdmin
-                                  ? "bg-indigo-600 text-white rounded-br-none"
-                                  : "bg-slate-800/90 border border-slate-700 text-white rounded-bl-none"
+                                  ? "bg-indigo-600 text-white rounded-br-none shadow-indigo-900/30"
+                                  : "bg-slate-800/95 border border-slate-700 text-white rounded-bl-none shadow-slate-950/40"
                               }`}
                             >
-                              <div className="text-[10px] font-bold opacity-75 mb-1">
-                                {msg.senderName}
+                              <div className="text-[10px] font-bold opacity-80 mb-1 flex items-center justify-between gap-4">
+                                <span>{msg.senderName}</span>
+                                {isAdmin && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-700/50 text-indigo-200">
+                                    الإشراف
+                                  </span>
+                                )}
                               </div>
-                              <div className="whitespace-pre-wrap">{msg.text}</div>
-                              <div className="text-[9px] text-slate-300 font-mono mt-1 opacity-70 text-left">
-                                {msg.timeFormatted}
+                              <div className="whitespace-pre-wrap break-words">{msg.text}</div>
+                              <div className="text-[9px] text-slate-300 font-mono mt-1.5 opacity-75 flex items-center justify-end gap-1">
+                                <span>{msg.timeFormatted}</span>
+                                {isAdmin && <CheckCheck className="w-3 h-3 text-indigo-300 inline" />}
                               </div>
                             </div>
                           </div>
@@ -1202,54 +1461,96 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                     <div ref={chatBottomRef} />
                   </div>
 
-                  {/* Quick Reply Presets */}
-                  <div className="py-2 border-t border-slate-800 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                  {/* Quick Reply Presets Bar */}
+                  <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/90 flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0">
+                    <span className="text-[10px] text-slate-400 shrink-0 font-bold">رد سريع:</span>
                     <button
                       type="button"
-                      onClick={() => handleQuickReply("أهلاً بحضرتك، تم استلام رسالتكم وجاري المتابعة فوراً.")}
-                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer"
+                      onClick={() =>
+                        handleQuickReply("أهلاً بحضرتك، تم استلام رسالتكم وجاري المتابعة فوراً مع الأستاذة.")
+                      }
+                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer transition border border-slate-700/60"
                     >
                       + تم استلام الرسالة
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleQuickReply("مستوى الطالب ممتاز وملتزم في الحصص وحل الواجبات.")}
-                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer"
+                      onClick={() =>
+                        handleQuickReply("مستوى الطالب ممتاز وملتزم في الحصص وحل الواجبات كاملة.")
+                      }
+                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer transition border border-slate-700/60"
                     >
                       + إشادة بالمستوى
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleQuickReply("يرجى التأكيد على الطالب بالاهتمام بمراجعة مسائل الدرس الأخير.")}
-                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer"
+                      onClick={() =>
+                        handleQuickReply("يرجى التنبيه على الطالب بضرورة مراجعة مسائل الدرس الأخير والواجب.")
+                      }
+                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer transition border border-slate-700/60"
                     >
                       + تنبيه بالواجب
                     </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleQuickReply("نرجو التواصل هاتفياً للأهمية لمناقشة أمر دراسي يخص الطالب.")
+                      }
+                      className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 whitespace-nowrap cursor-pointer transition border border-slate-700/60"
+                    >
+                      + طلب اتصال
+                    </button>
                   </div>
 
-                  {/* Chat input */}
-                  <form onSubmit={handleSendAdminChat} className="pt-2 flex items-center gap-2">
+                  {/* Bottom WhatsApp-Style Sticky Input Bar */}
+                  <form
+                    onSubmit={handleSendAdminChat}
+                    className="p-2.5 sm:p-3 bg-slate-900/95 border-t border-slate-800 flex items-center gap-2 shrink-0"
+                  >
                     <input
+                      ref={chatInputRef}
                       type="text"
                       value={adminChatText}
                       onChange={(e) => setAdminChatText(e.target.value)}
-                      placeholder="اكتب ردك لولي الأمر هنا..."
-                      className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-indigo-400"
+                      placeholder="اكتب رسالتك لولي الأمر هنا... (اضغط Enter للإرسال)"
+                      className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-950 border border-slate-700 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-400 transition"
                     />
                     <button
                       type="submit"
                       disabled={!adminChatText.trim() || isSending}
-                      className="p-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white transition shadow-md cursor-pointer flex items-center justify-center shrink-0"
+                      className="p-2.5 sm:px-4 sm:py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white transition shadow-md cursor-pointer flex items-center justify-center gap-1.5 shrink-0 font-bold text-xs"
                     >
+                      <span className="hidden sm:inline">إرسال</span>
                       <Send className="w-4 h-4 -rotate-90" />
                     </button>
                   </form>
                 </>
               ) : (
-                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 space-y-2">
-                  <MessageSquare className="w-12 h-12 text-slate-600" />
-                  <p className="text-sm font-bold text-white">اختر محادثة من القائمة الجانبية</p>
-                  <p className="text-xs text-slate-500">يمكنك الرد والتواصل المباشر مع أولياء الأمور فورياً.</p>
+                /* Desktop Placeholder Screen when No Chat is Selected */
+                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 space-y-4 p-8">
+                  <div className="w-20 h-20 rounded-3xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center shadow-xl">
+                    <MessageSquare className="w-10 h-10" />
+                  </div>
+                  <div className="space-y-1.5 max-w-sm">
+                    <h3 className="text-base sm:text-lg font-bold text-white font-fancy">
+                      مركز المحادثات والتواصل المباشر
+                    </h3>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      اختر محادثة من القائمة الجانبية لبدء التواصل الفوري مع ولي أمر الطالب والرد على الاستفسارات.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 pt-2">
+                    <div className="px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-[11px] text-slate-300 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                      <span>{chatThreadsSummary.length} محادثة مسجلة</span>
+                    </div>
+                    {totalUnreadChatCount > 0 && (
+                      <div className="px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-[11px] text-rose-300 font-bold flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                        <span>{totalUnreadChatCount} رسائل غير مقروءة</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

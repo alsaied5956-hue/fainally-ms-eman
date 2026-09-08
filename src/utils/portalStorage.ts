@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, onSnapshot, updateDoc, deleteDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, onSnapshot, updateDoc, deleteDoc, collection } from "firebase/firestore";
 import { db, ensureFirebaseAuth } from "./firebase";
 import { Student } from "../types";
 import {
@@ -759,6 +759,74 @@ export function subscribeToThreadChat(
   return () => {
     if (chatBus) {
       chatBus.removeEventListener("message", handleBusMessage);
+    }
+    if (unsubFirestore) {
+      unsubFirestore();
+    }
+  };
+}
+
+/**
+ * Subscribe to realtime updates for ALL chat threads across the platform
+ * Essential for WhatsApp-style real-time ordering and notifications
+ */
+export function subscribeToAllChats(
+  onUpdate: (chats: Record<string, ParentChatMessage[]>) => void
+): () => void {
+  // 1. Initial local load
+  onUpdate(getLocalChatMessages());
+
+  // 2. BroadcastChannel local listener
+  const handleBusMessage = (ev: MessageEvent) => {
+    if (ev.data?.type === "new_message" || ev.data?.type === "messages_read") {
+      onUpdate(getLocalChatMessages());
+    }
+  };
+
+  if (chatBus) {
+    chatBus.addEventListener("message", handleBusMessage);
+  }
+
+  // 3. LocalStorage storage event listener
+  const handleStorage = (ev: StorageEvent) => {
+    if (ev.key === LS_PORTAL_CHATS) {
+      onUpdate(getLocalChatMessages());
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorage);
+  }
+
+  // 4. Firestore collection snapshot listener
+  let unsubFirestore: (() => void) | null = null;
+  if (db) {
+    unsubFirestore = onSnapshot(collection(db, "parent_chats"), (snapshot) => {
+      const chats = getLocalChatMessages();
+      let hasChanges = false;
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const chatId = docSnap.id;
+        const cloudMessages = data?.messages as ParentChatMessage[] | undefined;
+        if (cloudMessages && Array.isArray(cloudMessages)) {
+          chats[chatId] = cloudMessages;
+          hasChanges = true;
+        }
+      });
+      if (hasChanges) {
+        saveLocalChatMessages(chats);
+        onUpdate({ ...chats });
+      }
+    }, (err) => {
+      console.warn("Firestore all-chats subscription error:", err);
+    });
+  }
+
+  return () => {
+    if (chatBus) {
+      chatBus.removeEventListener("message", handleBusMessage);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", handleStorage);
     }
     if (unsubFirestore) {
       unsubFirestore();
