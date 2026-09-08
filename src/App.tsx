@@ -68,6 +68,7 @@ import { EarlyWarningTab } from "./components/EarlyWarningTab";
 import { CertificatesTab } from "./components/CertificatesTab";
 import { ExcelIntegrationTab } from "./components/ExcelIntegrationTab";
 import { PlatformMessagingTab } from "./components/PlatformMessagingTab";
+import { dispatchPushNotification } from "./services/pushNotificationService";
 import { WhatsAppDirectTab } from "./components/WhatsAppDirectTab";
 import { ManageStudentsTab } from "./components/ManageStudentsTab";
 import { UsersTab } from "./components/UsersTab";
@@ -889,6 +890,19 @@ export default function App() {
     setPayments(updatedPayments);
     savePaymentsData(updatedPayments);
 
+    // 🔔 Native Background Web Push: Delivers to parent phone even if app is closed
+    const studentObj = students.find((s) => s.barcode === barcode);
+    const sName = studentObj?.name || "الطالب";
+    dispatchPushNotification({
+      targetUserIds: [barcode, studentObj?.parentPhone || "", studentObj?.phone || ""].filter(Boolean),
+      title: "💳 تأكيد سداد المصروفات",
+      body: `تم استلام سداد اشتراك شهر (${monthKey}) للطالب (${sName}) بمبلغ ${amount} ج.م بنجاح.`,
+      type: "fee",
+      tag: `pay-${barcode}-${monthKey}`,
+      eventId: `pay-${barcode}-${monthKey}-${amount}-${today}`,
+      url: "/?tab=payments",
+    }).catch(() => {});
+
     // ⚡ Supabase Realtime: Broadcast Payment to all assistant devices in <20ms
     broadcastPaymentChange({
       action: "record",
@@ -1032,6 +1046,19 @@ export default function App() {
 
     setStudents(updated);
     saveStudentsData(updated);
+
+    // 🔔 Native Background Web Push: Delivers to parent phone even if app is closed
+    const studentObj = students.find((s) => s.barcode === barcode);
+    const sName = studentObj?.name || "الطالب";
+    dispatchPushNotification({
+      targetUserIds: [barcode, studentObj?.parentPhone || "", studentObj?.phone || ""].filter(Boolean),
+      title: "📝 نتيجة اختبار رياضيات جديدة",
+      body: `حصل الطالب (${sName}) على درجة ${score} من ${maxScore} (${pct}%) في امتحان: ${examTitle}.`,
+      type: "grade",
+      tag: `exam-${barcode}-${Date.now()}`,
+      eventId: `exam-${barcode}-${examTitle}-${score}-${Date.now()}`,
+      url: "/?tab=exams",
+    }).catch(() => {});
   }, [students]);
 
   // Handler: Update Grade Record from Cumulative Table

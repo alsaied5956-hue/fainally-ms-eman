@@ -18,6 +18,8 @@ import {
   requestNotificationPermission,
   isNotificationSupported,
 } from "../../utils/portalNotifications";
+import { markEventProcessed, SESSION_START_TIME } from "../../utils/notificationTracker";
+import { registerPushSubscription } from "../../services/pushNotificationService";
 import {
   getTodayKey,
   getArabicDayName,
@@ -176,20 +178,77 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     return chatMessages.filter((m) => m.sender === "admin" && !m.isRead).length;
   }, [chatMessages]);
 
+  // Auto-subscribe to Web Push in background if permission is already granted
+  useEffect(() => {
+    if (
+      typeof window !== "undefined" &&
+      "Notification" in window &&
+      Notification.permission === "granted"
+    ) {
+      const targetId = activeStudent.barcode || account.parentPhone;
+      if (targetId) {
+        registerPushSubscription(targetId, "parent").catch(() => {});
+      }
+    }
+  }, [activeStudent.barcode, account.parentPhone]);
+
   // Request push notification permission
   const handleEnableNotifications = async () => {
-    const perm = await requestNotificationPermission(activeStudent.barcode || account.parentPhone, "parent");
+    const targetId = activeStudent.barcode || account.parentPhone;
+    const perm = await requestNotificationPermission(targetId, "parent");
     if (perm === "granted") {
       setHasNotifPerm(true);
       await sendPortalNotification(
         "منظومة الأستاذة إيمان الدمشيتي",
         `تم تفعيل الإشعارات الصوتية والمباشرة بنجاح لمتابعة الطالب (${activeStudent.name})!`,
-        "grade"
+        "grade",
+        { force: true }
       );
     }
   };
 
-  // 1. Live Attendance Status Alert Tracking
+  // Pre-seed and silence historical records on initial session startup
+  // This completely stops past messages, payments, or attendance from spamming on app open!
+  const hasPreSeededSessionRef = useRef(false);
+  useEffect(() => {
+    if (hasPreSeededSessionRef.current) return;
+    hasPreSeededSessionRef.current = true;
+
+    const todayStr = getTodayKey();
+
+    // 1. Mark existing today's attendance as seen
+    allChildBarcodes.forEach((b) => {
+      const status = attendanceToday[b];
+      if (status) {
+        const time = scanLogTimes[b] || "";
+        markEventProcessed(`att-${b}-${todayStr}-${status}-${time}`);
+      }
+    });
+
+    // 2. Mark existing payments as seen
+    allChildBarcodes.forEach((b) => {
+      Object.keys(payments || {}).forEach((mKey) => {
+        const rec = payments[mKey]?.[b];
+        if (rec) {
+          markEventProcessed(`pay-${b}-${rec.month || rec.monthKey || mKey}-${rec.amount}-${rec.date || ""}`);
+        }
+      });
+    });
+
+    // 3. Mark existing exams as seen
+    students.forEach((s) => {
+      (s.totalExamScores || []).forEach((score, idx) => {
+        markEventProcessed(`exam-${s.barcode}-${s.lastExamTitle || "exam"}-${score}-${idx}`);
+      });
+    });
+
+    // 4. Mark existing chat messages as seen for audio notification
+    chatMessages.forEach((msg) => {
+      markEventProcessed(`chat-${msg.id}`);
+    });
+  }, [allChildBarcodes, attendanceToday, scanLogTimes, payments, students, chatMessages]);
+
+  // 1. Live Attendance Status Alert Tracking (Genuine real-time scans only)
   const prevAttendanceRef = useRef<Record<string, string>>({});
   const isInitialAttendanceMount = useRef(true);
 
@@ -204,6 +263,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       return;
     }
 
+    const todayKey = getTodayKey();
+
     allChildBarcodes.forEach((barcode) => {
       const currentStatus = attendanceToday[barcode] || "";
       const prevStatus = prevAttendanceRef.current[barcode] || "";
@@ -212,24 +273,28 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         const studentObj = students.find((s) => s.barcode === barcode);
         const sName = studentObj?.name || "الطالب";
         const scanTime = scanLogTimes[barcode] || "";
+        const eventId = `att-${barcode}-${todayKey}-${currentStatus}-${scanTime}`;
 
         if (currentStatus === "حضور") {
           sendPortalNotification(
             "🟢 تسجيل حضور في المركز",
             `تم تسجيل وصول وحضور الطالب (${sName}) في المركز بنجاح! ${scanTime ? `(الوقت: ${scanTime})` : ""}`,
-            "attendance"
+            "attendance",
+            { eventId, url: "/?tab=attendance" }
           );
         } else if (currentStatus === "تأخير") {
           sendPortalNotification(
             "⚠️ تنبيه تأخير عن موعد الحصة",
             `تم تسجيل حضور الطالب (${sName}) متأخراً عن موعد بداية الحصة الرسمي. ${scanTime ? `(الوقت: ${scanTime})` : ""}`,
-            "delay"
+            "delay",
+            { eventId, url: "/?tab=attendance" }
           );
         } else if (currentStatus === "غياب") {
           sendPortalNotification(
             "🔴 تنبيه غياب عن الحصة",
             `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${sName}) عن موعد حصة اليوم.`,
-            "absence"
+            "absence",
+            { eventId, url: "/?tab=attendance" }
           );
         }
       }
@@ -238,12 +303,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     });
   }, [attendanceToday, allChildBarcodes, students, scanLogTimes]);
 
-  // 2. Live Payment Alert Tracking
+  // 2. Live Payment Alert Tracking (Genuine new receipts only)
   const prevPaymentsMapRef = useRef<Record<string, number>>({});
   const isInitialPaymentsMount = useRef(true);
 
   useEffect(() => {
-    // Helper to count how many months this student has paid
     const countStudentPaidMonths = (bCode: string) => {
       let count = 0;
       Object.keys(payments || {}).forEach((mKey) => {
@@ -270,7 +334,6 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         const studentObj = students.find((s) => s.barcode === barcode);
         const sName = studentObj?.name || "الطالب";
 
-        // Find latest payment record
         let latestRec: PaymentRecord | undefined;
         Object.keys(payments || {}).forEach((mKey) => {
           const rec = payments[mKey]?.[barcode];
@@ -282,10 +345,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         });
 
         if (latestRec) {
+          const monthTitle = latestRec.month || latestRec.monthKey;
+          const eventId = `pay-${barcode}-${monthTitle}-${latestRec.amount}-${latestRec.date || ""}`;
           sendPortalNotification(
             "💳 تأكيد سداد المصروفات",
-            `تم استلام سداد اشتراك شهر (${latestRec.month || latestRec.monthKey}) للطالب (${sName}) بمبلغ ${latestRec.amount} ج.م بنجاح.`,
-            "fee"
+            `تم استلام سداد اشتراك شهر (${monthTitle}) للطالب (${sName}) بمبلغ ${latestRec.amount} ج.م بنجاح.`,
+            "fee",
+            { eventId, url: "/?tab=payments" }
           );
         }
       }
@@ -294,7 +360,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     });
   }, [payments, allChildBarcodes, students]);
 
-  // 3. Live Exam Grade Alert Tracking
+  // 3. Live Exam Grade Alert Tracking (Genuine newly published results only)
   const prevExamCountRef = useRef<Record<string, number>>({});
   const isInitialExamsMount = useRef(true);
 
@@ -319,11 +385,14 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       if (currentCount > prevCount && scores.length > 0) {
         const latestExam = scores[scores.length - 1];
         const sName = studentObj?.name || "الطالب";
+        const examTitle = studentObj?.lastExamTitle || "امتحان الرياضيات";
+        const eventId = `exam-${barcode}-${examTitle}-${latestExam}-${Date.now()}`;
 
         sendPortalNotification(
           "📝 نتيجة اختبار جديدة",
-          `حصل الطالب (${sName}) على درجة ${latestExam.score} من ${latestExam.maxScore} في امتحان: ${latestExam.title}`,
-          "grade"
+          `حصل الطالب (${sName}) على نتيجة اختبار: ${studentObj?.lastExamScore || `${latestExam}%`}`,
+          "grade",
+          { eventId, url: "/?tab=exams" }
         );
       }
 
@@ -331,28 +400,25 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     });
   }, [students, allChildBarcodes]);
 
-  // 4. Live Chat Alert Tracking (when admin replies)
-  const prevAdminChatCountRef = useRef<number>(-1);
-
+  // 4. Live Chat Alert Tracking (Only new unread incoming admin messages, never replaying past messages)
   useEffect(() => {
-    const adminMsgs = chatMessages.filter((m) => m.sender === "admin");
-    if (prevAdminChatCountRef.current === -1) {
-      prevAdminChatCountRef.current = adminMsgs.length;
-      return;
-    }
+    if (activeTab === "chat") return;
 
-    if (adminMsgs.length > prevAdminChatCountRef.current) {
-      const latestMsg = adminMsgs[adminMsgs.length - 1];
-      if (latestMsg && activeTab !== "chat") {
+    chatMessages.forEach((msg) => {
+      if (msg.sender === "admin" && !msg.isRead) {
+        const eventId = `chat-${msg.id}`;
         sendPortalNotification(
           "💬 رسالة جديدة من إدارة المركز",
-          `الأستاذة إيمان الدمشيتي: "${latestMsg.text.slice(0, 75)}"`,
-          "chat"
+          `الأستاذة إيمان الدمشيتي: "${msg.text.slice(0, 75)}"`,
+          "chat",
+          {
+            eventId,
+            timestamp: msg.timestamp,
+            url: "/?tab=chat",
+          }
         );
       }
-    }
-
-    prevAdminChatCountRef.current = adminMsgs.length;
+    });
   }, [chatMessages, activeTab]);
 
   // ----------------------------------------------------

@@ -83,7 +83,7 @@ self.addEventListener("fetch", (event) => {
 self.addEventListener("push", (event) => {
   let data = {
     title: "منظومة الأستاذة إيمان الدمشيتي",
-    body: "تنبيه جديد بخصوص حضور وجدول الطالب في المنظومة",
+    body: "تنبيه جديد بخصوص الطالب في المنظومة",
     icon: "/icon.svg",
     badge: "/icon.svg",
     url: "/"
@@ -98,6 +98,8 @@ self.addEventListener("push", (event) => {
     }
   }
 
+  const notifTag = data.tag || data.eventId || `eman-push-${Date.now()}`;
+
   const options = {
     body: data.body,
     icon: data.icon || "/icon.svg",
@@ -106,20 +108,35 @@ self.addEventListener("push", (event) => {
     silent: false, // Rings device's default notification ringtone
     renotify: true, // Alerts phone sound even if prior notification is still in tray
     requireInteraction: true,
+    tag: notifTag,
     actions: [
       { action: "open_portal", title: "عرض المنظومة" },
       { action: "view_attendance", title: "سجل الحضور" }
     ],
     data: {
       url: data.url || "/",
-      timestamp: Date.now()
+      eventId: data.eventId,
+      timestamp: data.timestamp || Date.now()
     },
     dir: "rtl",
     lang: "ar"
   };
 
+  // Broadcast to open clients so they can immediately mark event as processed
+  const notifyClients = self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+    clientList.forEach((client) => {
+      client.postMessage({
+        type: "PUSH_RECEIVED",
+        eventId: data.eventId,
+      });
+    });
+  });
+
   event.waitUntil(
-    self.registration.showNotification(data.title, options)
+    Promise.all([
+      self.registration.showNotification(data.title, options),
+      notifyClients
+    ])
   );
 });
 

@@ -159,6 +159,8 @@ export async function requestNotificationPermission(
   }
 }
 
+import { shouldNotifyEvent, markEventProcessed } from "./notificationTracker";
+
 /**
  * Send an instantaneous in-app or system push notification with audio alert
  */
@@ -166,8 +168,27 @@ export async function sendPortalNotification(
   title: string,
   body: string,
   type: NotificationType = "alert",
-  options?: { url?: string; sound?: boolean }
+  options?: {
+    url?: string;
+    sound?: boolean;
+    eventId?: string;
+    timestamp?: number;
+    force?: boolean;
+  }
 ): Promise<void> {
+  // Deduplication check: Do not re-notify if already processed or historical
+  if (options?.eventId) {
+    if (
+      !shouldNotifyEvent({
+        eventId: options.eventId,
+        timestamp: options.timestamp,
+        force: options.force,
+      })
+    ) {
+      return;
+    }
+  }
+
   // 1. Play acoustic chime if not explicitly muted
   if (options?.sound !== false) {
     playPortalAudioChime(type);
@@ -184,6 +205,7 @@ export async function sendPortalNotification(
   if (isNotificationSupported() && Notification.permission === "granted") {
     const vibratePattern = [300, 100, 300, 100, 400];
     const targetUrl = options?.url || "/";
+    const notifTag = options?.eventId || `eman-${type}-${Date.now()}`;
 
     // A. Service Worker Registration (Required on Android Chrome, highly reliable across all mobile browsers)
     if ("serviceWorker" in navigator) {
@@ -203,8 +225,8 @@ export async function sendPortalNotification(
             silent: false, // Rings the phone's native notification sound
             renotify: true, // Guarantees new sound even if previous notif is unread
             requireInteraction: true,
-            tag: `eman-${type}-${Date.now()}`,
-            data: { url: targetUrl },
+            tag: notifTag,
+            data: { url: targetUrl, eventId: options?.eventId },
             dir: "rtl",
             lang: "ar",
           } as any);
@@ -219,7 +241,8 @@ export async function sendPortalNotification(
               badge: "/icon.svg",
               vibrate: vibratePattern,
               url: targetUrl,
-              tag: `eman-${type}-${Date.now()}`,
+              tag: notifTag,
+              eventId: options?.eventId,
             });
           }
           return;
@@ -234,6 +257,7 @@ export async function sendPortalNotification(
       new Notification(title, {
         body,
         icon: "/icon.svg",
+        tag: notifTag,
         silent: false,
         dir: "rtl",
         lang: "ar",

@@ -7,11 +7,12 @@
 import { supabase } from "../utils/supabaseClient";
 import { db } from "../utils/firebase";
 import { collection, doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { markEventProcessed } from "../utils/notificationTracker";
 
-// Standard VAPID Public Key for Web Push (Can also be configured via environment variable)
+// Standard VAPID Public Key matching the backend server
 export const VAPID_PUBLIC_KEY =
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_VAPID_PUBLIC_KEY) ||
-  "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBKr3qBUYIHBQFLXYp5Nksh8U";
+  "BE0N1wV5fSDpg0YAO8uoPXzWpBYJznOLFcF05uh8P-Du7NMgWpbcafllzDXaeDp8FPAXkS6p50KE0v9SfDHNZXQ";
 
 /**
  * Converts a base64 string to a Uint8Array for pushManager.subscribe applicationServerKey
@@ -79,10 +80,20 @@ export async function registerPushSubscription(
       // Periodic sync is optional and depends on browser PWA installation
     }
 
-    // 4. Check for existing subscription or create a new one
+    // 4. Retrieve VAPID Key (dynamically from server or fallback constant)
+    let activeVapidKey = VAPID_PUBLIC_KEY;
+    try {
+      const res = await fetch("/api/push-public-key");
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.publicKey) activeVapidKey = data.publicKey;
+      }
+    } catch {}
+
+    // 5. Check for existing subscription or create a new one
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
-      const convertedKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+      const convertedKey = urlBase64ToUint8Array(activeVapidKey);
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: convertedKey,
@@ -95,7 +106,7 @@ export async function registerPushSubscription(
       return null;
     }
 
-    // 5. Persist the subscription to database (Supabase + Firestore)
+    // 6. Persist the subscription to backend server + database
     await savePushSubscription(userId, userRole, subJson);
 
     return subJson;
@@ -106,8 +117,8 @@ export async function registerPushSubscription(
 }
 
 /**
- * Persists the client's Push Subscription into both Supabase and Firestore
- * to allow server-side background triggers when the app is completely closed.
+ * Persists the client's Push Subscription into Backend Server, Firestore, and Supabase
+ * so background triggers can reach the phone even when app is closed.
  */
 export async function savePushSubscription(
   userId: string,
@@ -119,7 +130,22 @@ export async function savePushSubscription(
   const auth = sub.keys.auth;
   const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
 
-  // 1. Supabase push_subscriptions table
+  // 1. Primary Backend Express API (for instant web-push sending)
+  try {
+    await fetch("/api/push-subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        userRole,
+        subscription: sub,
+      }),
+    });
+  } catch (err) {
+    console.warn("Could not register push to Express backend:", err);
+  }
+
+  // 2. Supabase push_subscriptions table
   if (supabase) {
     try {
       await supabase.from("push_subscriptions").upsert(
@@ -139,10 +165,9 @@ export async function savePushSubscription(
     }
   }
 
-  // 2. Firestore push_subscriptions collection
+  // 3. Firestore push_subscriptions collection
   if (db) {
     try {
-      // Use hash or base64 safe id of endpoint
       const cleanDocId = encodeURIComponent(endpoint).slice(-80);
       await setDoc(
         doc(collection(db, "push_subscriptions"), cleanDocId),
@@ -161,6 +186,45 @@ export async function savePushSubscription(
       console.warn("Failed saving push subscription to Firestore:", err);
     }
   }
+}
+
+/**
+ * Dispatches a native Web Push notification to target users (e.g. parents of a student).
+ * This awakens the recipient's phone/browser via Google/Apple push even if the app is completely closed!
+ */
+export async function dispatchPushNotification(payload: {
+  targetUserIds?: string | string[];
+  role?: "parent" | "admin" | "all";
+  title: string;
+  body: string;
+  icon?: string;
+  url?: string;
+  tag?: string;
+  eventId?: string;
+  type?: string;
+}): Promise<boolean> {
+  const eventId = payload.eventId || `ev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  
+  // Pre-mark locally so this client doesn't double-alert
+  markEventProcessed(eventId);
+
+  try {
+    const res = await fetch("/api/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        eventId,
+      }),
+    });
+
+    if (res.ok) {
+      return true;
+    }
+  } catch (err) {
+    console.warn("dispatchPushNotification network warning:", err);
+  }
+  return false;
 }
 
 /**

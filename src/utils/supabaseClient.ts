@@ -255,21 +255,29 @@ export function subscribeToStudentChanges(
 const barcodeToIdCache = new Map<string, string>();
 
 async function getStudentIdByBarcode(barcode: string): Promise<string | null> {
-  const b = String(barcode).trim();
-  if (barcodeToIdCache.has(b)) {
-    return barcodeToIdCache.get(b)!;
-  }
-  const { data } = await supabase
-    .from("students")
-    .select("id")
-    .eq("barcode", b)
-    .maybeSingle();
+  try {
+    const b = String(barcode).trim();
+    if (barcodeToIdCache.has(b)) {
+      return barcodeToIdCache.get(b)!;
+    }
+    const { data, error } = await supabase
+      .from("students")
+      .select("id")
+      .eq("barcode", b)
+      .maybeSingle();
 
-  if (data?.id) {
-    barcodeToIdCache.set(b, data.id);
-    return data.id;
+    if (error || !data) {
+      return null;
+    }
+    if (data?.id) {
+      barcodeToIdCache.set(b, data.id);
+      return data.id;
+    }
+    return null;
+  } catch (err) {
+    console.warn("getStudentIdByBarcode error:", err);
+    return null;
   }
-  return null;
 }
 
 /** Save single attendance record to Supabase */
@@ -281,24 +289,28 @@ export async function saveAttendanceToSupabase(record: {
   dateKey?: string;
   scannedBy?: string;
 }): Promise<void> {
-  const dateKey = record.dateKey || getTodayDateKey();
-  const studentId = await getStudentIdByBarcode(record.barcode);
-  if (!studentId) return;
+  try {
+    const dateKey = record.dateKey || getTodayDateKey();
+    const studentId = await getStudentIdByBarcode(record.barcode);
+    if (!studentId) return;
 
-  await supabase
-    .from("attendance_logs")
-    .upsert(
-      {
-        student_id: studentId,
-        barcode: String(record.barcode).trim(),
-        student_name: record.studentName,
-        date_key: dateKey,
-        time_recorded: record.timeIso || new Date().toISOString(),
-        status: record.status,
-        scanned_by: record.scannedBy || "admin",
-      },
-      { onConflict: "student_id,date_key" }
-    );
+    await supabase
+      .from("attendance_logs")
+      .upsert(
+        {
+          student_id: studentId,
+          barcode: String(record.barcode).trim(),
+          student_name: record.studentName,
+          date_key: dateKey,
+          time_recorded: record.timeIso || new Date().toISOString(),
+          status: record.status,
+          scanned_by: record.scannedBy || "admin",
+        },
+        { onConflict: "student_id,date_key" }
+      );
+  } catch (err) {
+    console.warn("saveAttendanceToSupabase error:", err);
+  }
 }
 
 /**
@@ -316,27 +328,31 @@ export async function saveBulkAttendanceToSupabase(
 ): Promise<void> {
   if (!records || records.length === 0) return;
 
-  const rowsToInsert = [];
-  for (const rec of records) {
-    const sId = await getStudentIdByBarcode(rec.barcode);
-    if (!sId) continue;
-    rowsToInsert.push({
-      student_id: sId,
-      barcode: String(rec.barcode).trim(),
-      student_name: rec.studentName,
-      date_key: rec.dateKey,
-      time_recorded: new Date().toISOString(),
-      status: rec.status,
-      scanned_by: rec.scannedBy || "admin",
-    });
-  }
+  try {
+    const rowsToInsert = [];
+    for (const rec of records) {
+      const sId = await getStudentIdByBarcode(rec.barcode);
+      if (!sId) continue;
+      rowsToInsert.push({
+        student_id: sId,
+        barcode: String(rec.barcode).trim(),
+        student_name: rec.studentName,
+        date_key: rec.dateKey,
+        time_recorded: new Date().toISOString(),
+        status: rec.status,
+        scanned_by: rec.scannedBy || "admin",
+      });
+    }
 
-  const chunkSize = 100;
-  for (let i = 0; i < rowsToInsert.length; i += chunkSize) {
-    const chunk = rowsToInsert.slice(i, i + chunkSize);
-    await supabase
-      .from("attendance_logs")
-      .upsert(chunk, { onConflict: "student_id,date_key" });
+    const chunkSize = 100;
+    for (let i = 0; i < rowsToInsert.length; i += chunkSize) {
+      const chunk = rowsToInsert.slice(i, i + chunkSize);
+      await supabase
+        .from("attendance_logs")
+        .upsert(chunk, { onConflict: "student_id,date_key" });
+    }
+  } catch (err) {
+    console.warn("saveBulkAttendanceToSupabase error:", err);
   }
 }
 
@@ -349,37 +365,45 @@ export async function savePaymentToSupabase(record: {
   note?: string;
   recordedBy?: string;
 }): Promise<void> {
-  const studentId = await getStudentIdByBarcode(record.barcode);
-  if (!studentId) return;
+  try {
+    const studentId = await getStudentIdByBarcode(record.barcode);
+    if (!studentId) return;
 
-  await supabase
-    .from("payments")
-    .upsert(
-      {
-        student_id: studentId,
-        month_key: record.monthKey,
-        amount_paid: Number(record.amount) || 0,
-        required_amount: Number(record.amount) || 100,
-        discount: 0,
-        status: "paid",
-        payment_date: record.date ? new Date(record.date).toISOString() : new Date().toISOString(),
-        received_by: record.recordedBy || "admin",
-        notes: record.note || "سداد اشتراك",
-      },
-      { onConflict: "student_id,month_key" }
-    );
+    await supabase
+      .from("payments")
+      .upsert(
+        {
+          student_id: studentId,
+          month_key: record.monthKey,
+          amount_paid: Number(record.amount) || 0,
+          required_amount: Number(record.amount) || 100,
+          discount: 0,
+          status: "paid",
+          payment_date: record.date ? new Date(record.date).toISOString() : new Date().toISOString(),
+          received_by: record.recordedBy || "admin",
+          notes: record.note || "سداد اشتراك",
+        },
+        { onConflict: "student_id,month_key" }
+      );
+  } catch (err) {
+    console.warn("savePaymentToSupabase error:", err);
+  }
 }
 
 /** Delete payment from Supabase */
 export async function deletePaymentFromSupabase(barcode: string, monthKey: string): Promise<void> {
-  const studentId = await getStudentIdByBarcode(barcode);
-  if (!studentId) return;
+  try {
+    const studentId = await getStudentIdByBarcode(barcode);
+    if (!studentId) return;
 
-  await supabase
-    .from("payments")
-    .delete()
-    .eq("student_id", studentId)
-    .eq("month_key", monthKey);
+    await supabase
+      .from("payments")
+      .delete()
+      .eq("student_id", studentId)
+      .eq("month_key", monthKey);
+  } catch (err) {
+    console.warn("deletePaymentFromSupabase error:", err);
+  }
 }
 
 /** Save or update homework record in Supabase */
@@ -391,57 +415,69 @@ export async function saveHomeworkToSupabase(records: Array<{
 }>): Promise<void> {
   if (!records || records.length === 0) return;
 
-  const rows = [];
-  for (const r of records) {
-    const sId = await getStudentIdByBarcode(r.barcode);
-    if (!sId) continue;
-    rows.push({
-      student_id: sId,
-      date_key: r.dateKey,
-      title: "واجب الحصة",
-      status: r.status,
-      notes: r.notes || "",
-    });
-  }
+  try {
+    const rows = [];
+    for (const r of records) {
+      const sId = await getStudentIdByBarcode(r.barcode);
+      if (!sId) continue;
+      rows.push({
+        student_id: sId,
+        date_key: r.dateKey,
+        title: "واجب الحصة",
+        status: r.status,
+        notes: r.notes || "",
+      });
+    }
 
-  if (rows.length > 0) {
-    await supabase.from("homework").insert(rows);
+    if (rows.length > 0) {
+      await supabase.from("homework").insert(rows);
+    }
+  } catch (err) {
+    console.warn("saveHomeworkToSupabase error:", err);
   }
 }
 
 /** Save student to Supabase */
 export async function saveStudentToSupabase(s: any): Promise<void> {
   if (!s || !s.barcode) return;
-  const payload = {
-    barcode: String(s.barcode).trim(),
-    name: s.name || "طالب بدون اسم",
-    phone: String(s.phone || ""),
-    parent_phone: String(s.parentPhone || s.phone || "00000000000"),
-    grade: s.groupGrade || s.grade || "غير محدد",
-    group_days: s.groupDays || "غير محدد",
-    group_time: s.groupTime || "04:00 م",
-    monthly_fee: Number(s.monthlyFee) || 0,
-    discount: Number(s.discount) || 0,
-    notes: s.notes || "",
-    is_active: s.isActive !== false,
-  };
+  try {
+    const payload = {
+      barcode: String(s.barcode).trim(),
+      name: s.name || "طالب بدون اسم",
+      phone: String(s.phone || ""),
+      parent_phone: String(s.parentPhone || s.phone || "00000000000"),
+      grade: s.groupGrade || s.grade || "غير محدد",
+      group_days: s.groupDays || "غير محدد",
+      group_time: s.groupTime || "04:00 م",
+      monthly_fee: Number(s.monthlyFee) || 0,
+      discount: Number(s.discount) || 0,
+      notes: s.notes || "",
+      is_active: s.isActive !== false,
+    };
 
-  const { data } = await supabase
-    .from("students")
-    .upsert(payload, { onConflict: "barcode" })
-    .select("id")
-    .single();
+    const { data } = await supabase
+      .from("students")
+      .upsert(payload, { onConflict: "barcode" })
+      .select("id")
+      .single();
 
-  if (data?.id) {
-    barcodeToIdCache.set(String(s.barcode).trim(), data.id);
+    if (data?.id) {
+      barcodeToIdCache.set(String(s.barcode).trim(), data.id);
+    }
+  } catch (err) {
+    console.warn("saveStudentToSupabase error:", err);
   }
 }
 
 /** Delete student from Supabase */
 export async function deleteStudentFromSupabase(barcode: string): Promise<void> {
-  const b = String(barcode).trim();
-  barcodeToIdCache.delete(b);
-  await supabase.from("students").delete().eq("barcode", b);
+  try {
+    const b = String(barcode).trim();
+    barcodeToIdCache.delete(b);
+    await supabase.from("students").delete().eq("barcode", b);
+  } catch (err) {
+    console.warn("deleteStudentFromSupabase error:", err);
+  }
 }
 
 /**

@@ -18,6 +18,7 @@ import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
 import { enqueuePlatformMessagesBatch, flushPendingSyncToCloud } from "../utils/storage";
 import { pushLiveAttendanceEvent } from "../utils/liveEventStream";
+import { dispatchPushNotification } from "../services/pushNotificationService";
 import {
   broadcastLiveScan,
   saveAttendanceToSupabase,
@@ -304,6 +305,22 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 1️⃣ Live Event Pipeline: Instant broadcast to Firestore path `live_events/today`
     pushLiveAttendanceEvent(student.barcode, calculatedStatus, now.getTime());
 
+    // 🔔 Native Background Web Push: Dispatches to parent device even when phone is locked or app is closed
+    dispatchPushNotification({
+      targetUserIds: [student.barcode, student.parentPhone || "", student.phone || ""].filter(Boolean),
+      title:
+        calculatedStatus === "حضور"
+          ? "🟢 تسجيل حضور في المركز"
+          : calculatedStatus === "تأخير"
+          ? "⚠️ تنبيه تأخير عن الحصة"
+          : "🔴 تنبيه غياب عن الحصة",
+      body: `تم تسجيل ${calculatedStatus} للطالب (${student.name}) في مركز الرياضيات (${nowTimeStr}).`,
+      type: "attendance",
+      tag: `att-${student.barcode}-${nowTimeStr}`,
+      eventId: `att-${student.barcode}-${calculatedStatus}-${nowTimeStr}`,
+      url: "/?tab=attendance",
+    }).catch(() => {});
+
     // ⚡ Supabase Realtime: Instant broadcast across all assistant screens in <20ms
     broadcastLiveScan({
       barcode: student.barcode,
@@ -537,9 +554,27 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 1️⃣ Live Event Pipeline: Instant broadcast for absent and late students to `live_events/today`
     absentList.forEach((a) => {
       pushLiveAttendanceEvent(a.student.barcode, "غائب", Date.now());
+      dispatchPushNotification({
+        targetUserIds: [a.student.barcode, a.student.parentPhone || "", a.student.phone || ""].filter(Boolean),
+        title: "🔴 تنبيه غياب عن الحصة",
+        body: a.message || `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${a.student.name}) عن موعد الحصة اليوم.`,
+        type: "absence",
+        tag: `abs-${a.student.barcode}-${Date.now()}`,
+        eventId: `abs-${a.student.barcode}-${Date.now()}`,
+        url: "/?tab=attendance",
+      }).catch(() => {});
     });
     lateList.forEach((l) => {
       pushLiveAttendanceEvent(l.student.barcode, "تأخير", Date.now());
+      dispatchPushNotification({
+        targetUserIds: [l.student.barcode, l.student.parentPhone || "", l.student.phone || ""].filter(Boolean),
+        title: "⚠️ تنبيه تأخير عن موعد الحصة",
+        body: l.message || `تم تسجيل حضور الطالب (${l.student.name}) متأخراً عن موعد الحصة اليوم.`,
+        type: "delay",
+        tag: `late-${l.student.barcode}-${Date.now()}`,
+        eventId: `late-${l.student.barcode}-${Date.now()}`,
+        url: "/?tab=attendance",
+      }).catch(() => {});
     });
 
     // 2. Direct Platform Notifications sent to Firebase platform_messages & notifications collections

@@ -669,6 +669,34 @@ export async function sendParentChatMessage(
     console.warn("Failed to persist chat to Firestore:", err);
   }
 
+  // Background Web Push to recipient phone/device (delivers even if app is completely closed)
+  try {
+    const { dispatchPushNotification } = await import("../services/pushNotificationService");
+    if (sender === "admin") {
+      dispatchPushNotification({
+        targetUserIds: [chatId],
+        title: "💬 رسالة جديدة من إدارة المركز",
+        body: `الأستاذة إيمان الدمشيتي: "${text.slice(0, 80)}"`,
+        type: "chat",
+        eventId: newMsg.id,
+        tag: `chat-${chatId}`,
+        url: "/?tab=chat",
+      }).catch(() => {});
+    } else {
+      dispatchPushNotification({
+        role: "admin",
+        title: `💬 رسالة من ولي أمر (${senderName})`,
+        body: text.slice(0, 80),
+        type: "chat",
+        eventId: newMsg.id,
+        tag: `chat-${chatId}`,
+        url: "/?tab=chat",
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.warn("Chat background push dispatch failed:", err);
+  }
+
   return newMsg;
 }
 
