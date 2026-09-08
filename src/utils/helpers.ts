@@ -96,9 +96,27 @@ export function getGroupForDate(dateInput: string | Date = new Date()): GroupDay
 }
 
 /**
- * Check if date is an official attendance day for this student group
+ * Returns the official day-of-week indexes (0=Sun..6=Sat) for a group:
+ * Group A (Sat, Mon, Wed) -> [6, 1, 3]
+ * Group B (Sun, Tue, Thu) -> [0, 2, 4]
  */
-export function isOfficialGroupDay(groupDays: string, dateInput: string | Date = new Date()): boolean {
+export function getValidDaysForGroup(groupDays: string = ""): number[] {
+  const norm = String(groupDays).toLowerCase();
+  const isSatMonWed = norm.includes("سبت") || norm.includes("إثنين") || norm.includes("group a") || norm.includes("sat");
+  if (isSatMonWed) {
+    return [6, 1, 3]; // Saturday, Monday, Wednesday
+  }
+  return [0, 2, 4]; // Sunday, Tuesday, Thursday
+}
+
+/**
+ * Check if date is an official attendance day for this student group.
+ * Strictly checks that the day matches the scheduled days of the group.
+ * Group A: Saturday (6), Monday (1), Wednesday (3) ONLY.
+ * Group B: Sunday (0), Tuesday (2), Thursday (4) ONLY.
+ * Any other day (such as Friday 5 or cross-group days) returns false.
+ */
+export function isOfficialGroupDay(groupDays: string = "", dateInput: string | Date = new Date()): boolean {
   let d: Date;
   if (dateInput instanceof Date) {
     d = dateInput;
@@ -110,11 +128,16 @@ export function isOfficialGroupDay(groupDays: string, dateInput: string | Date =
   }
 
   const dayNum = d.getDay();
-  const isSatMonWed = groupDays.includes("سبت") || groupDays.includes("إثنين");
-  if (isSatMonWed) {
-    return dayNum === 6 || dayNum === 1 || dayNum === 3;
-  }
-  return dayNum === 0 || dayNum === 2 || dayNum === 4;
+  const validDays = getValidDaysForGroup(groupDays);
+  return validDays.includes(dayNum);
+}
+
+/**
+ * Filters an array of date strings (YYYY-MM-DD) strictly to only those matching
+ * the student's assigned group schedule.
+ */
+export function filterDatesByGroupSchedule(dates: string[], groupDays: string = ""): string[] {
+  return dates.filter((dateStr) => isOfficialGroupDay(groupDays, dateStr));
 }
 
 // Convert Arabic digits to English, remove non-digits, and normalize Egypt WhatsApp

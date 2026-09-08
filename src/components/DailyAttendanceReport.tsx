@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
-import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName } from "../utils/helpers";
+import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName, getGroupForDate, isOfficialGroupDay } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAttendanceHistoryToExcel } from "../utils/excel";
 import { Calendar, Filter, FileSpreadsheet, FileText, CheckCircle2, AlertTriangle, XCircle, Edit3, Search, X } from "lucide-react";
@@ -20,7 +20,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
 }) => {
   const [selectedDate, setSelectedDate] = useState<string>(getTodayKey());
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
-  const [filterDays, setFilterDays] = useState<string>("ALL");
+  const [filterDays, setFilterDays] = useState<string>("AUTO");
   const [searchQuery, setSearchQuery] = useState("");
 
   const [editingStudent, setEditingStudent] = useState<{ barcode: string; name: string; currentStatus: string } | null>(null);
@@ -28,10 +28,19 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
 
   const dateAttendanceMap = attendanceHistory[selectedDate] || {};
 
+  // Auto-resolve scheduled group matching the selected date:
+  // Saturday, Monday, Wednesday -> "سبت - إثنين - أربعاء" (Group A)
+  // Sunday, Tuesday, Thursday -> "أحد - ثلاثاء - خميس" (Group B)
+  const scheduledGroupForDate = useMemo(() => getGroupForDate(selectedDate), [selectedDate]);
+  const activeDaysFilter = filterDays === "AUTO" ? scheduledGroupForDate : filterDays;
+
   const filteredStudents = useMemo(() => {
     const base = students.filter((s) => {
       if (filterGrade !== "ALL" && s.groupGrade !== filterGrade) return false;
-      if (filterDays !== "ALL" && s.groupDays !== filterDays) return false;
+      // Strict schedule isolation: only show students whose scheduled group matches the active filter/date
+      if (activeDaysFilter !== "ALL") {
+        if (s.groupDays !== activeDaysFilter) return false;
+      }
       return true;
     });
 
@@ -48,7 +57,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     }
 
     return sortStudentsByGradeAndName(base);
-  }, [students, filterGrade, filterDays, searchQuery]);
+  }, [students, filterGrade, activeDaysFilter, searchQuery]);
 
   const { presentCount, lateCount, absentCount } = useMemo(() => {
     let present = 0;
@@ -128,9 +137,12 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
             onChange={(e) => setFilterDays(e.target.value)}
             className="bg-[#080d1e] border border-indigo-500/30 text-slate-100 text-xs font-bold px-3.5 py-2.5 rounded-2xl outline-none"
           >
-            <option value="ALL" className="bg-slate-900 text-white">كل الأيام</option>
-            <option value="سبت - إثنين - أربعاء" className="bg-slate-900 text-white">سبت - إثنين - أربعاء</option>
-            <option value="أحد - ثلاثاء - خميس" className="bg-slate-900 text-white">أحد - ثلاثاء - خميس</option>
+            <option value="AUTO" className="bg-slate-900 text-amber-300">
+              ⚡ تلقائي حسب جدول اليوم ({scheduledGroupForDate})
+            </option>
+            <option value="سبت - إثنين - أربعاء" className="bg-slate-900 text-white">سبت - إثنين - أربعاء (Group A)</option>
+            <option value="أحد - ثلاثاء - خميس" className="bg-slate-900 text-white">أحد - ثلاثاء - خميس (Group B)</option>
+            <option value="ALL" className="bg-slate-900 text-white">كل الأيام والمجموعات (عرض غير مقيد)</option>
           </select>
 
           {/* Seamless Search Input */}

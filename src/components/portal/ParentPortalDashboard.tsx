@@ -468,22 +468,25 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   const unpaidMonthsPastCurrent = useMemo(() => ledgerEntries.filter((e) => !e.isPaid && e.isPastOrCurrent).length, [ledgerEntries]);
   const totalOverdueAmount = useMemo(() => unpaidMonthsPastCurrent * standardMonthlyFee, [unpaidMonthsPastCurrent, standardMonthlyFee]);
 
-  // 6. Attendance & Absence Logs with Correct Days & Timezone Safety
+  // 6. Attendance & Absence Logs with Strict Schedule Isolation (Group A: Sat/Mon/Wed, Group B: Sun/Tue/Thu)
   const attendanceScheduleLogs = useMemo(() => {
     const studentGroupDays = activeStudent.groupDays || "سبت - إثنين - أربعاء";
     const logs: AttendanceScheduleLog[] = [];
     const allRecordedDates = new Set<string>();
 
     // 1. All dates recorded in attendanceHistory for this student
+    // STRICT ISOLATION: Only include dates that strictly match the student's assigned group schedule
     Object.keys(attendanceHistory || {}).forEach((dateStr) => {
       if (attendanceHistory[dateStr]?.[activeStudent.barcode]) {
-        allRecordedDates.add(dateStr);
+        if (isOfficialGroupDay(studentGroupDays, dateStr)) {
+          allRecordedDates.add(dateStr);
+        }
       }
     });
 
-    // 2. Today's scan
+    // 2. Today's scan - only include if today is strictly an official scheduled day for this group
     const todayKey = getTodayKey();
-    if (attendanceToday[activeStudent.barcode]) {
+    if (attendanceToday[activeStudent.barcode] && isOfficialGroupDay(studentGroupDays, todayKey)) {
       allRecordedDates.add(todayKey);
     }
 
@@ -491,6 +494,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     const sortedDates = Array.from(allRecordedDates).sort((a, b) => b.localeCompare(a));
 
     sortedDates.forEach((dateStr) => {
+      // Secondary safety check: strictly skip any cross-day or off-schedule entries
+      if (!isOfficialGroupDay(studentGroupDays, dateStr)) {
+        return;
+      }
+
       const rawStatus = dateStr === todayKey
         ? (attendanceToday[activeStudent.barcode] || attendanceHistory[dateStr]?.[activeStudent.barcode])
         : attendanceHistory[dateStr]?.[activeStudent.barcode];
@@ -503,9 +511,6 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       else if (rawStatus === "تأخير") finalStatus = "تأخير";
       else if (rawStatus === "غائب" || rawStatus === "غياب") finalStatus = "غائب";
       else if (rawStatus === "إذن") finalStatus = "إذن";
-
-      const official = isOfficialGroupDay(studentGroupDays, dateStr);
-      const isSubstitute = !official && (finalStatus === "حضور" || finalStatus === "تأخير");
 
       // Timezone-safe Arabic day name calculation
       const parts = dateStr.split("-").map(Number);
@@ -521,13 +526,9 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         dayName,
         status: finalStatus,
         timeRecorded: dateStr === todayKey ? scanLogTimes[activeStudent.barcode] : undefined,
-        isOfficialScheduledDay: official,
-        isSubstituteDay: isSubstitute,
-        note: isSubstitute
-          ? "حضور إضافي / تعويضي (في غير اليوم المعتاد للمجموعة)"
-          : official
-          ? "حصة في اليوم الرسمي للمجموعة"
-          : undefined,
+        isOfficialScheduledDay: true,
+        isSubstituteDay: false,
+        note: `حصة رسمية مجدولة - ${studentGroupDays}`,
       });
     });
 

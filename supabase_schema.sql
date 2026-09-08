@@ -166,3 +166,70 @@ create or replace trigger on_student_updated
     before update on public.students
     for each row
     execute function public.handle_updated_at();
+
+-- ------------------------------------------------------------------------
+-- 7. SCHEDULE-ISOLATED ATTENDANCE VIEW (Group A vs Group B)
+-- ------------------------------------------------------------------------
+-- Group A: Saturday (6), Monday (1), Wednesday (3)
+-- Group B: Sunday (0), Tuesday (2), Thursday (4)
+-- Enforces strict mathematical isolation between groups preventing cross-day leakage
+create or replace view public.v_student_attendance_schedule_isolated as
+select 
+    a.id as log_id,
+    s.id as student_id,
+    s.barcode,
+    s.name as student_name,
+    s.grade,
+    s.group_days,
+    a.date_key,
+    extract(dow from a.date_key::date)::int as day_of_week,
+    to_char(a.date_key::date, 'Day') as day_name_en,
+    a.status,
+    a.time_recorded,
+    a.session_slot_id,
+    a.scanned_by,
+    a.notes
+from public.attendance_logs a
+join public.students s on a.student_id = s.id
+where (
+    -- Group A: Saturday (6), Monday (1), Wednesday (3)
+    (
+        (s.group_days like '%سبت%' or s.group_days ilike '%group a%' or s.group_days ilike '%sat%')
+        and extract(dow from a.date_key::date) in (6, 1, 3)
+    )
+    or
+    -- Group B: Sunday (0), Tuesday (2), Thursday (4)
+    (
+        (s.group_days like '%أحد%' or s.group_days ilike '%group b%' or s.group_days ilike '%sun%')
+        and extract(dow from a.date_key::date) in (0, 2, 4)
+    )
+);
+
+-- Stored procedure to fetch isolated attendance records by barcode with schedule validation
+create or replace function public.get_isolated_student_attendance(p_barcode text)
+returns table (
+    log_id uuid,
+    barcode text,
+    student_name text,
+    grade text,
+    group_days text,
+    date_key text,
+    status text,
+    time_recorded timestamptz
+) as $$
+begin
+    return query
+    select 
+        v.log_id,
+        v.barcode,
+        v.student_name,
+        v.grade,
+        v.group_days,
+        v.date_key,
+        v.status,
+        v.time_recorded
+    from public.v_student_attendance_schedule_isolated v
+    where v.barcode = trim(p_barcode)
+    order by v.date_key desc;
+end;
+$$ language plpgsql security definer;

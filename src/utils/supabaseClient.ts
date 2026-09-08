@@ -5,6 +5,7 @@
  */
 
 import { createClient, SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
+import { isOfficialGroupDay } from "./helpers";
 
 const SUPABASE_URL =
   (import.meta as any).env?.VITE_SUPABASE_URL || "https://lzdvmzumwuqycwdecaan.supabase.co";
@@ -441,4 +442,45 @@ export async function deleteStudentFromSupabase(barcode: string): Promise<void> 
   const b = String(barcode).trim();
   barcodeToIdCache.delete(b);
   await supabase.from("students").delete().eq("barcode", b);
+}
+
+/**
+ * Fetch real attendance logs for a student directly from Supabase,
+ * dynamically filtering out cross-day or off-schedule records based on the student's assigned group schedule.
+ * Group A: Sat/Mon/Wed only
+ * Group B: Sun/Tue/Thu only
+ */
+export async function fetchStudentAttendanceBySchedule(
+  barcode: string,
+  groupDays?: string
+): Promise<Array<{
+  id: string;
+  barcode: string;
+  studentName: string;
+  dateKey: string;
+  status: "حضور" | "تأخير" | "غياب";
+  timeRecorded: string;
+  sessionSlotId?: string;
+  scannedBy?: string;
+  notes?: string;
+}>> {
+  const b = String(barcode).trim();
+  
+  const { data, error } = await supabase
+    .from("attendance_logs")
+    .select("*")
+    .eq("barcode", b)
+    .order("date_key", { ascending: false });
+
+  if (error || !data) {
+    console.warn("Failed to fetch attendance logs from Supabase:", error);
+    return [];
+  }
+
+  // If groupDays is provided, strictly isolate dates according to the group schedule
+  if (groupDays) {
+    return data.filter((row) => isOfficialGroupDay(groupDays, row.date_key));
+  }
+
+  return data;
 }
