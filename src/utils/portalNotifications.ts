@@ -134,12 +134,22 @@ export function isNotificationSupported(): boolean {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
+export interface PortalNotificationOptions {
+  url?: string;
+  sound?: boolean;
+  targetBarcodes?: string[];
+  targetPhone?: string;
+  targetRole?: "parent" | "admin" | "all";
+}
+
 /**
  * Request permission for web push notifications
  */
 export async function requestNotificationPermission(
   userId?: string,
-  userRole: "parent" | "student" | "admin" = "parent"
+  userRole: "parent" | "student" | "admin" = "parent",
+  barcodes: string[] = [],
+  phone: string = ""
 ): Promise<NotificationPermission> {
   if (!isNotificationSupported()) {
     return "denied";
@@ -149,7 +159,7 @@ export async function requestNotificationPermission(
     if (perm === "granted" && userId) {
       import("../services/pushNotificationService")
         .then(({ registerPushSubscription }) => {
-          registerPushSubscription(userId, userRole).catch(() => {});
+          registerPushSubscription(userId, userRole, barcodes, phone).catch(() => {});
         })
         .catch(() => {});
     }
@@ -160,20 +170,37 @@ export async function requestNotificationPermission(
 }
 
 /**
- * Send an instantaneous in-app or system push notification with audio alert
+ * Send an instantaneous in-app, system, or remote push notification with audio alert
  */
 export async function sendPortalNotification(
   title: string,
   body: string,
   type: NotificationType = "alert",
-  options?: { url?: string; sound?: boolean }
+  options?: PortalNotificationOptions
 ): Promise<void> {
   // 1. Play acoustic chime if not explicitly muted
   if (options?.sound !== false) {
     playPortalAudioChime(type);
   }
 
-  // 2. Trigger mobile phone physical vibration if hardware supports it
+  // 2. Dispatch real server push to remote devices (parents or admins whose app is closed)
+  if (options?.targetBarcodes?.length || options?.targetPhone || options?.targetRole) {
+    import("../services/pushNotificationService")
+      .then(({ dispatchServerPushNotification }) => {
+        dispatchServerPushNotification({
+          targetBarcodes: options.targetBarcodes,
+          targetPhone: options.targetPhone,
+          targetRole: options.targetRole,
+          title,
+          body,
+          url: options?.url,
+          type,
+        }).catch(() => {});
+      })
+      .catch(() => {});
+  }
+
+  // 3. Trigger mobile phone physical vibration if hardware supports it
   if (typeof navigator !== "undefined" && "vibrate" in navigator) {
     try {
       navigator.vibrate([250, 100, 250, 100, 350]);

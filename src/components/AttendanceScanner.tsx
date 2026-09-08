@@ -18,6 +18,7 @@ import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
 import { enqueuePlatformMessagesBatch, flushPendingSyncToCloud } from "../utils/storage";
 import { pushLiveAttendanceEvent } from "../utils/liveEventStream";
+import { sendPortalNotification } from "../utils/portalNotifications";
 import {
   broadcastLiveScan,
   saveAttendanceToSupabase,
@@ -326,6 +327,20 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       timeIso: now.toISOString(),
       scannedBy: "admin",
     }).catch(console.warn);
+
+    // 🔔 Real-time Web Push notification to parent's phone (delivered even if their app is closed)
+    sendPortalNotification(
+      calculatedStatus === "تأخير"
+        ? `🟡 تسجيل دخول متأخر: ${student.name}`
+        : `🟢 تسجيل حضور: ${student.name}`,
+      `تم رصد حضور الطالب في الموعد (${nowTimeStr}). المجموعة: ${student.groupGrade}`,
+      calculatedStatus === "تأخير" ? "delay" : "attendance",
+      {
+        targetBarcodes: [student.barcode],
+        targetPhone: student.parentPhone || student.phone,
+        url: `/?tab=attendance&barcode=${student.barcode}`,
+      }
+    ).catch(() => {});
 
     playBeep("success");
     speakArabicGreeting(student.name, voiceEnabled);

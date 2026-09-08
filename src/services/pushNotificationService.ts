@@ -1,17 +1,18 @@
 /**
  * Background Push Notification Service
  * Handles Web Push subscriptions, Service Worker background push registration,
- * Periodic Background Sync, and synchronization with Supabase & Firebase Firestore.
+ * Periodic Background Sync, Server-Side RFC 8291 Web Push Dispatch,
+ * and synchronization with Local Cache, Supabase & Firebase Firestore.
  */
 
 import { supabase } from "../utils/supabaseClient";
 import { db } from "../utils/firebase";
 import { collection, doc, setDoc, serverTimestamp } from "firebase/firestore";
 
-// Standard VAPID Public Key for Web Push (Can also be configured via environment variable)
+// Standard VAPID Public Key for Web Push (paired with server VAPID private key)
 export const VAPID_PUBLIC_KEY =
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_VAPID_PUBLIC_KEY) ||
-  "BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBKr3qBUYIHBQFLXYp5Nksh8U";
+  "BD_lWLiEajdLu3oPaxC7ZZLu24QMzOHp6MjYkOx5fpm82UdO1GrL6skaYCYmSZYGeXc530kFZrGcxbh7Su2DEGs";
 
 /**
  * Converts a base64 string to a Uint8Array for pushManager.subscribe applicationServerKey
@@ -37,12 +38,32 @@ export interface PushSubscriptionData {
 }
 
 /**
+ * Check if the current browser session has an active Push Subscription
+ */
+export async function getActivePushSubscription(): Promise<PushSubscriptionData | null> {
+  if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+    return null;
+  }
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) return null;
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription) return null;
+    return subscription.toJSON() as PushSubscriptionData;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Registers the Service Worker and requests a Push Subscription from the browser push service (FCM / Mozilla / Apple).
  * Works reliably when the application is completely closed or in the background.
  */
 export async function registerPushSubscription(
   userId: string,
-  userRole: "parent" | "student" | "admin" = "parent"
+  userRole: "parent" | "student" | "admin" | string = "parent",
+  barcodes: string[] = [],
+  phone: string = ""
 ): Promise<PushSubscriptionData | null> {
   if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
     console.warn("Web Push is not supported in this browser environment.");
@@ -98,6 +119,27 @@ export async function registerPushSubscription(
     // 5. Persist the subscription to database (Supabase + Firestore)
     await savePushSubscription(userId, userRole, subJson);
 
+    // 6. Register with Server API so the server can push directly to this device when app is closed
+    const allBarcodes = Array.from(
+      new Set([...barcodes, ...(userId ? [String(userId)] : [])])
+    );
+    try {
+      await fetch("/api/push-subscription", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          userRole,
+          barcodes: allBarcodes,
+          phone,
+          subscription: subJson,
+          userAgent: navigator.userAgent,
+        }),
+      });
+    } catch (err) {
+      console.warn("Could not post push subscription to backend server:", err);
+    }
+
     return subJson;
   } catch (error) {
     console.error("Failed to register Web Push Subscription:", error);
@@ -142,7 +184,6 @@ export async function savePushSubscription(
   // 2. Firestore push_subscriptions collection
   if (db) {
     try {
-      // Use hash or base64 safe id of endpoint
       const cleanDocId = encodeURIComponent(endpoint).slice(-80);
       await setDoc(
         doc(collection(db, "push_subscriptions"), cleanDocId),
@@ -160,6 +201,82 @@ export async function savePushSubscription(
     } catch (err) {
       console.warn("Failed saving push subscription to Firestore:", err);
     }
+  }
+}
+
+/**
+ * Dispatches a Real Web Push Notification via Server to target device(s)
+ * Triggers native system notifications on the target phone even when the app is completely closed.
+ */
+export async function dispatchServerPushNotification(options: {
+  targetBarcodes?: string[];
+  targetPhone?: string;
+  targetRole?: "parent" | "admin" | "all";
+  title: string;
+  body: string;
+  url?: string;
+  type?: string;
+  data?: Record<string, any>;
+}): Promise<{ success: boolean; delivered?: number }> {
+  try {
+    const res = await fetch("/api/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP error ${res.status}`);
+    }
+
+    const json = await res.json();
+    return { success: true, delivered: json.delivered };
+  } catch (err) {
+    console.warn("Dispatch server push warning:", err);
+    return { success: false };
+  }
+}
+
+/**
+ * Schedules a delayed test push so the user can lock their phone screen or close the app
+ * and verify that the notification arrives and rings in the background.
+ */
+export async function scheduleTestBackgroundPush(delaySeconds: number = 5): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  try {
+    const sub = await getActivePushSubscription();
+    if (!sub) {
+      return {
+        success: false,
+        message: "لم يتم تفعيل الإشعارات بعد على هذا الجهاز. يرجى تفعيل الإشعارات أولاً.",
+      };
+    }
+
+    const res = await fetch("/api/test-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subscription: sub,
+        delaySeconds,
+        title: "🔔 وصول إشعار المنظومة والتطبيق مقفول بنجاح!",
+        body: "رائع! هاتفك يدعم الآن استلام إشعارات الحضور والغياب والدرجات والمحادثات حتى عند إغلاق التطبيق وقفل الشاشة.",
+      }),
+    });
+
+    const json = await res.json();
+    return {
+      success: true,
+      message:
+        json.message ||
+        `تم جدولة الإشعار بعد ${delaySeconds} ثوانٍ. اقفل شاشة هاتفك الآن للتأكد!`,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err.message || "فشل جدولة اختبار الإشعار. تحقق من الاتصال بالإنترنت.",
+    };
   }
 }
 
