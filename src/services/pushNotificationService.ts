@@ -43,7 +43,8 @@ export interface PushSubscriptionData {
  */
 export async function registerPushSubscription(
   userId: string,
-  userRole: "parent" | "student" | "admin" = "parent"
+  userRole: "parent" | "student" | "admin" = "parent",
+  aliases: string[] = []
 ): Promise<PushSubscriptionData | null> {
   if (typeof window === "undefined" || !("serviceWorker" in navigator) || !("PushManager" in window)) {
     console.warn("Web Push is not supported in this browser environment.");
@@ -90,10 +91,35 @@ export async function registerPushSubscription(
       }
     } catch {}
 
+    const convertedKey = urlBase64ToUint8Array(activeVapidKey);
+
     // 5. Check for existing subscription or create a new one
     let subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      // Verify subscription applicationServerKey matches current server key
+      try {
+        const rawKey = subscription.options?.applicationServerKey;
+        if (rawKey) {
+          const keyArr = new Uint8Array(rawKey);
+          let match = keyArr.length === convertedKey.length;
+          if (match) {
+            for (let i = 0; i < keyArr.length; i++) {
+              if (keyArr[i] !== convertedKey[i]) {
+                match = false;
+                break;
+              }
+            }
+          }
+          if (!match) {
+            console.log("Renewing Web Push subscription for updated server VAPID key...");
+            await subscription.unsubscribe();
+            subscription = null;
+          }
+        }
+      } catch {}
+    }
+
     if (!subscription) {
-      const convertedKey = urlBase64ToUint8Array(activeVapidKey);
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: convertedKey,
@@ -107,7 +133,7 @@ export async function registerPushSubscription(
     }
 
     // 6. Persist the subscription to backend server + database
-    await savePushSubscription(userId, userRole, subJson);
+    await savePushSubscription(userId, userRole, subJson, aliases);
 
     return subJson;
   } catch (error) {
@@ -123,12 +149,14 @@ export async function registerPushSubscription(
 export async function savePushSubscription(
   userId: string,
   userRole: string,
-  sub: PushSubscriptionData
+  sub: PushSubscriptionData,
+  aliases: string[] = []
 ): Promise<void> {
   const endpoint = sub.endpoint;
   const p256dh = sub.keys.p256dh;
   const auth = sub.keys.auth;
   const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const cleanAliases = Array.isArray(aliases) ? aliases.map(String).filter(Boolean) : [];
 
   // 1. Primary Backend Express API (for instant web-push sending)
   try {
@@ -138,6 +166,7 @@ export async function savePushSubscription(
       body: JSON.stringify({
         userId,
         userRole,
+        aliases: cleanAliases,
         subscription: sub,
       }),
     });
@@ -145,27 +174,7 @@ export async function savePushSubscription(
     console.warn("Could not register push to Express backend:", err);
   }
 
-  // 2. Supabase push_subscriptions table
-  if (supabase) {
-    try {
-      await supabase.from("push_subscriptions").upsert(
-        {
-          user_id: userId,
-          user_role: userRole,
-          endpoint,
-          p256dh,
-          auth,
-          user_agent: userAgent,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "endpoint" }
-      );
-    } catch (err) {
-      console.warn("Failed saving push subscription to Supabase:", err);
-    }
-  }
-
-  // 3. Firestore push_subscriptions collection
+  // 2. Firestore push_subscriptions collection
   if (db) {
     try {
       const cleanDocId = encodeURIComponent(endpoint).slice(-80);
@@ -174,6 +183,7 @@ export async function savePushSubscription(
         {
           userId,
           userRole,
+          aliases: cleanAliases,
           endpoint,
           p256dh,
           auth,

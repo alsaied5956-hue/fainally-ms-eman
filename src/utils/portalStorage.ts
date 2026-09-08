@@ -673,8 +673,44 @@ export async function sendParentChatMessage(
   try {
     const { dispatchPushNotification } = await import("../services/pushNotificationService");
     if (sender === "admin") {
+      // Find all possible aliases (parent phone, linked student barcodes) for this chatId
+      const accounts = getLocalParentAccounts();
+      const matchedAccount = Object.values(accounts).find(
+        (a) =>
+          a.studentBarcode === chatId ||
+          a.parentPhone === chatId ||
+          a.linkedBarcodes?.includes(chatId)
+      );
+
+      let studentParentPhone = "";
+      let studentPhone = "";
+      try {
+        const rawCenterData = localStorage.getItem("center_data_v2");
+        if (rawCenterData) {
+          const parsed = JSON.parse(rawCenterData);
+          const found = (parsed.students || []).find(
+            (s: any) => s.barcode === chatId || s.parentPhone === chatId || s.phone === chatId
+          );
+          if (found) {
+            studentParentPhone = found.parentPhone || "";
+            studentPhone = found.phone || "";
+          }
+        }
+      } catch {}
+
+      const targetUserIds = Array.from(
+        new Set([
+          chatId,
+          matchedAccount?.parentPhone,
+          matchedAccount?.studentBarcode,
+          ...(matchedAccount?.linkedBarcodes || []),
+          studentParentPhone,
+          studentPhone,
+        ])
+      ).filter(Boolean) as string[];
+
       dispatchPushNotification({
-        targetUserIds: [chatId],
+        targetUserIds,
         title: "💬 رسالة جديدة من إدارة المركز",
         body: `الأستاذة إيمان الدمشيتي: "${text.slice(0, 80)}"`,
         type: "chat",

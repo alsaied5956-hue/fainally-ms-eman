@@ -139,7 +139,8 @@ export function isNotificationSupported(): boolean {
  */
 export async function requestNotificationPermission(
   userId?: string,
-  userRole: "parent" | "student" | "admin" = "parent"
+  userRole: "parent" | "student" | "admin" = "parent",
+  aliases: string[] = []
 ): Promise<NotificationPermission> {
   if (!isNotificationSupported()) {
     return "denied";
@@ -149,7 +150,7 @@ export async function requestNotificationPermission(
     if (perm === "granted" && userId) {
       import("../services/pushNotificationService")
         .then(({ registerPushSubscription }) => {
-          registerPushSubscription(userId, userRole).catch(() => {});
+          registerPushSubscription(userId, userRole, aliases).catch(() => {});
         })
         .catch(() => {});
     }
@@ -230,21 +231,6 @@ export async function sendPortalNotification(
             dir: "rtl",
             lang: "ar",
           } as any);
-
-          // Also post message to Service Worker controller for background tracking
-          if (navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage({
-              type: "SHOW_PORTAL_NOTIFICATION",
-              title,
-              body,
-              icon: "/icon.svg",
-              badge: "/icon.svg",
-              vibrate: vibratePattern,
-              url: targetUrl,
-              tag: notifTag,
-              eventId: options?.eventId,
-            });
-          }
           return;
         }
       } catch (err) {

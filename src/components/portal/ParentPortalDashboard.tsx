@@ -92,8 +92,51 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     account.studentBarcode
   );
 
-  // Active navigation tab
-  const [activeTab, setActiveTab] = useState<ParentPortalTab>("dashboard");
+  // Active navigation tab (reads ?tab=... from notification click if present)
+  const [activeTab, setActiveTab] = useState<ParentPortalTab>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const urlTab = new URLSearchParams(window.location.search).get("tab");
+        const validTabs: ParentPortalTab[] = [
+          "dashboard",
+          "attendance",
+          "financials",
+          "exams",
+          "homework",
+          "chat",
+          "profile",
+        ];
+        if (urlTab && validTabs.includes(urlTab as ParentPortalTab)) {
+          return urlTab as ParentPortalTab;
+        }
+      } catch {}
+    }
+    return "dashboard";
+  });
+
+  // Listen to popstate / location changes from notification clicks
+  useEffect(() => {
+    const handleUrlChange = () => {
+      try {
+        const urlTab = new URLSearchParams(window.location.search).get("tab");
+        const validTabs: ParentPortalTab[] = [
+          "dashboard",
+          "attendance",
+          "financials",
+          "exams",
+          "homework",
+          "chat",
+          "profile",
+        ];
+        if (urlTab && validTabs.includes(urlTab as ParentPortalTab)) {
+          setActiveTab(urlTab as ParentPortalTab);
+        }
+      } catch {}
+    };
+
+    window.addEventListener("popstate", handleUrlChange);
+    return () => window.removeEventListener("popstate", handleUrlChange);
+  }, []);
 
   // Financial Sub-Tab: "ledger" (full academic year) vs "receipts" (recorded receipts)
   const [activeFinancialSubTab, setActiveFinancialSubTab] = useState<"ledger" | "receipts">("ledger");
@@ -185,22 +228,44 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       "Notification" in window &&
       Notification.permission === "granted"
     ) {
+      const allAliases = Array.from(
+        new Set([
+          account.studentBarcode,
+          ...(account.linkedBarcodes || []),
+          account.parentPhone,
+          activeStudent.barcode,
+          activeStudent.parentPhone,
+          activeStudent.phone,
+        ])
+      ).filter(Boolean) as string[];
+
       const targetId = activeStudent.barcode || account.parentPhone;
       if (targetId) {
-        registerPushSubscription(targetId, "parent").catch(() => {});
+        registerPushSubscription(targetId, "parent", allAliases).catch(() => {});
       }
     }
-  }, [activeStudent.barcode, account.parentPhone]);
+  }, [activeStudent.barcode, account.parentPhone, account.studentBarcode, account.linkedBarcodes]);
 
   // Request push notification permission
   const handleEnableNotifications = async () => {
+    const allAliases = Array.from(
+      new Set([
+        account.studentBarcode,
+        ...(account.linkedBarcodes || []),
+        account.parentPhone,
+        activeStudent.barcode,
+        activeStudent.parentPhone,
+        activeStudent.phone,
+      ])
+    ).filter(Boolean) as string[];
+
     const targetId = activeStudent.barcode || account.parentPhone;
-    const perm = await requestNotificationPermission(targetId, "parent");
+    const perm = await requestNotificationPermission(targetId, "parent", allAliases);
     if (perm === "granted") {
       setHasNotifPerm(true);
       await sendPortalNotification(
         "منظومة الأستاذة إيمان الدمشيتي",
-        `تم تفعيل الإشعارات الصوتية والمباشرة بنجاح لمتابعة الطالب (${activeStudent.name})!`,
+        `تم تفعيل الإشعارات المباشرة بنجاح لمتابعة الطالب (${activeStudent.name}) حتى والتطبيق مغلق!`,
         "grade",
         { force: true }
       );
@@ -400,23 +465,52 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     });
   }, [students, allChildBarcodes]);
 
-  // 4. Live Chat Alert Tracking (Only new unread incoming admin messages, never replaying past messages)
-  useEffect(() => {
-    if (activeTab === "chat") return;
+  // 4. Live Chat Alert Tracking:
+  // Pre-seeds existing messages on initial thread load so historical/already-read messages NEVER replay!
+  // Only genuine, fresh incoming admin messages arriving while app is active will trigger a notification.
+  const knownMsgIdsRef = useRef<Set<string>>(new Set());
+  const isInitialChatLoadDoneRef = useRef(false);
 
+  // Reset thread message tracker when switching between child barcodes
+  useEffect(() => {
+    isInitialChatLoadDoneRef.current = false;
+    knownMsgIdsRef.current = new Set();
+  }, [activeStudent.barcode]);
+
+  useEffect(() => {
+    // When thread first loads, silently mark all present messages as already known & processed
+    if (!isInitialChatLoadDoneRef.current) {
+      if (chatMessages.length > 0) {
+        chatMessages.forEach((m) => {
+          knownMsgIdsRef.current.add(m.id);
+          markEventProcessed(m.id);
+          markEventProcessed(`chat-${m.id}`);
+        });
+        isInitialChatLoadDoneRef.current = true;
+      }
+      return;
+    }
+
+    // Subsequent updates: only inspect brand new incoming messages
     chatMessages.forEach((msg) => {
-      if (msg.sender === "admin" && !msg.isRead) {
-        const eventId = `chat-${msg.id}`;
-        sendPortalNotification(
-          "💬 رسالة جديدة من إدارة المركز",
-          `الأستاذة إيمان الدمشيتي: "${msg.text.slice(0, 75)}"`,
-          "chat",
-          {
-            eventId,
-            timestamp: msg.timestamp,
-            url: "/?tab=chat",
-          }
-        );
+      if (!knownMsgIdsRef.current.has(msg.id)) {
+        knownMsgIdsRef.current.add(msg.id);
+        markEventProcessed(msg.id);
+        markEventProcessed(`chat-${msg.id}`);
+
+        // Only alert if sent by admin and parent is not actively viewing the chat tab
+        if (msg.sender === "admin" && !msg.isRead && activeTab !== "chat") {
+          sendPortalNotification(
+            "💬 رسالة جديدة من إدارة المركز",
+            `الأستاذة إيمان الدمشيتي: "${msg.text.slice(0, 75)}"`,
+            "chat",
+            {
+              eventId: msg.id,
+              timestamp: msg.timestamp,
+              url: "/?tab=chat",
+            }
+          );
+        }
       }
     });
   }, [chatMessages, activeTab]);

@@ -35,6 +35,7 @@ try {
 // ----------------------------------------------------
 interface StoredSubscription {
   userId: string; // studentBarcode or parentPhone or "admin"
+  aliases?: string[];
   userRole?: string;
   endpoint: string;
   keys: {
@@ -47,6 +48,13 @@ interface StoredSubscription {
 
 const subscriptionsCache = new Map<string, StoredSubscription>();
 const SUBS_FILE = path.join(process.cwd(), ".push_subscriptions_store.json");
+
+function normalizeId(id: string): string {
+  let s = String(id || "").trim();
+  if (s.startsWith("+2")) s = s.slice(2);
+  if (s.startsWith("0")) s = s.slice(1);
+  return s;
+}
 
 function loadStoredSubscriptions(): void {
   try {
@@ -95,14 +103,19 @@ app.get("/api/push-public-key", (_req, res) => {
 // 3. Register or Update Web Push Subscription
 app.post("/api/push-subscribe", (req, res) => {
   try {
-    const { userId, userRole, subscription } = req.body;
+    const { userId, userRole, aliases, subscription } = req.body;
     if (!subscription || !subscription.endpoint || !subscription.keys) {
       return res.status(400).json({ error: "Invalid subscription payload" });
     }
 
     const cleanUserId = String(userId || "guest").trim();
+    const cleanAliases = Array.isArray(aliases)
+      ? aliases.map((a: any) => String(a).trim()).filter(Boolean)
+      : [];
+
     const stored: StoredSubscription = {
       userId: cleanUserId,
+      aliases: cleanAliases,
       userRole: userRole || "parent",
       endpoint: subscription.endpoint,
       keys: {
@@ -116,7 +129,7 @@ app.post("/api/push-subscribe", (req, res) => {
     subscriptionsCache.set(subscription.endpoint, stored);
     persistStoredSubscriptions();
 
-    console.log(`[Push] Registered subscription for user ${cleanUserId} (${userRole || "parent"}). Total: ${subscriptionsCache.size}`);
+    console.log(`[Push] Registered subscription for user ${cleanUserId} (aliases: ${cleanAliases.length}). Total: ${subscriptionsCache.size}`);
     return res.json({ success: true, count: subscriptionsCache.size });
   } catch (err: any) {
     console.error("push-subscribe error:", err);
@@ -157,10 +170,17 @@ app.post("/api/send-push", async (req, res) => {
     });
 
     const targetList = Array.isArray(targetUserIds)
-      ? targetUserIds.map((id) => String(id).trim())
+      ? targetUserIds.map((id) => String(id).trim()).filter(Boolean)
       : targetUserIds
       ? [String(targetUserIds).trim()]
       : [];
+
+    const normalizedTargets = new Set<string>();
+    targetList.forEach((t) => {
+      normalizedTargets.add(t);
+      const norm = normalizeId(t);
+      if (norm) normalizedTargets.add(norm);
+    });
 
     const matchedSubs: StoredSubscription[] = [];
 
@@ -169,8 +189,12 @@ app.post("/api/send-push", async (req, res) => {
 
       // Filter by target IDs (e.g. barcode or parent phone)
       if (targetList.length > 0) {
-        if (targetList.includes(sub.userId)) {
-          isMatch = true;
+        const subIds = [sub.userId, ...(sub.aliases || [])];
+        for (const sId of subIds) {
+          if (normalizedTargets.has(sId) || normalizedTargets.has(normalizeId(sId))) {
+            isMatch = true;
+            break;
+          }
         }
       } else if (role) {
         // Filter by role (e.g. all parents or all admins)
