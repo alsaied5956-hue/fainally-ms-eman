@@ -1,0 +1,80 @@
+import { Student, PaymentRecord, GroupDays, GradeName } from "../types";
+
+export interface ParentAccount {
+  studentBarcode: string;
+  linkedBarcodes: string[];
+  parentPhone: string;
+  password: string;
+  status: "active" | "disabled";
+  createdAt: string;
+  updatedAt?: string;
+  lastLoginAt?: string;
+}
+
+export interface ParentChatMessage {
+  id: string;
+  chatId: string; // The primary student barcode for this conversation thread
+  sender: "parent" | "admin";
+  senderName: string;
+  text: string;
+  timestamp: number;
+  timeFormatted: string;
+  isRead: boolean;
+}
+
+export interface AdminPortalSettings {
+  adminBarcode: string;
+  adminPassword: string;
+  pushNotificationsEnabled: boolean;
+  soundAlertsEnabled: boolean;
+  updatedAt?: string;
+}
+
+export type PortalUserRole = "parent" | "admin" | null;
+
+export interface PortalSession {
+  role: PortalUserRole;
+  barcode: string;
+  currentStudentBarcode?: string;
+  account?: ParentAccount;
+  token?: string;
+}
+
+export type ParentPortalTab =
+  | "dashboard"
+  | "attendance"
+  | "financials"
+  | "exams"
+  | "homework"
+  | "chat"
+  | "profile";
+
+export type AdminPortalTab =
+  | "accounts"
+  | "chats"
+  | "settings";
+
+export interface AttendanceScheduleLog {
+  date: string;
+  dayName: string;
+  status: "حضور" | "تأخير" | "غائب" | "إذن" | "غير محدد";
+  timeRecorded?: string;
+  isOfficialScheduledDay: boolean;
+  isSubstituteDay: boolean; // Cross-group replacement attendance
+  note?: string;
+}
+
+export interface HomeworkLogItem {
+  id: string;
+  date: string;
+  status: "مكتمل" | "ناقص" | "لم يحل" | "معفى";
+  pointsDelta: number;
+  notes?: string;
+}
+
+export interface DelayRecordItem {
+  date: string;
+  time: string;
+  delayMinutes: number;
+  note?: string;
+}

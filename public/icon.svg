@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#1e1b4b" />
+      <stop offset="100%" stop-color="#090d16" />
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="50%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background container with squircle border -->
+  <rect width="512" height="512" rx="120" fill="url(#bgGrad)" />
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="none" stroke="url(#goldGrad)" stroke-width="4" opacity="0.3" />
+
+  <!-- Outer ambient glow ring -->
+  <circle cx="256" cy="256" r="170" fill="none" stroke="#f59e0b" stroke-width="2" opacity="0.15" stroke-dasharray="12 8" />
+
+  <!-- Graduation Mortarboard / Mathematics Emblem -->
+  <g filter="url(#glow)">
+    <!-- Cap top rhombus -->
+    <path d="M 256 120 L 416 195 L 256 270 L 96 195 Z" fill="url(#goldGrad)" />
+    <!-- Cap skull base -->
+    <path d="M 160 225 L 160 300 C 160 350, 352 350, 352 300 L 352 225 L 256 270 Z" fill="#b45309" opacity="0.9" />
+    <path d="M 176 245 L 176 295 C 176 335, 336 335, 336 295 L 336 245" fill="none" stroke="url(#goldGrad)" stroke-width="4" />
+    <!-- Tassel -->
+    <path d="M 400 202 L 400 310" stroke="#fef08a" stroke-width="5" stroke-linecap="round" />
+    <circle cx="400" cy="320" r="10" fill="#fef08a" />
+  </g>
+
+  <!-- Mathematics Sigma / Alpha Accent in Center -->
+  <g fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.95">
+    <!-- Sigma symbol below cap -->
+    <path d="M 226 360 L 286 360 L 246 395 L 286 430 L 226 430" />
+    <!-- Dots for portal connection -->
+    <circle cx="316" cy="395" r="4" fill="#f59e0b" />
+    <circle cx="196" cy="395" r="4" fill="#f59e0b" />
+  </g>
+</svg>

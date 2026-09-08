@@ -1,0 +1,569 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #050711;
+    --card-bg: #090e1f;
+    --card-border: rgba(99, 102, 241, 0.18);
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+  }
+
+  [data-theme="light"],
+  .light {
+    --bg-main: #f8fafc;
+    --card-bg: #ffffff;
+    --card-border: #e2e8f0;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+  }
+}
+
+/* Typography Utility Classes */
+.font-fancy {
+  font-family: 'El Messiri', 'Cairo', sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.font-cairo {
+  font-family: 'Cairo', 'Readex Pro', sans-serif;
+}
+
+.font-readex {
+  font-family: 'Readex Pro', 'Alexandria', sans-serif;
+}
+
+.font-tajawal {
+  font-family: 'Tajawal', 'Cairo', sans-serif;
+}
+
+/* High-Performance Clean Ambient Styling */
+html, body {
+  background-color: #050711;
+  font-family: 'Readex Pro', 'Cairo', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+main, aside, .custom-scrollbar {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: auto !important;
+  will-change: scroll-position;
+}
+
+button, [role="button"], a {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Luxury Utilities - Optimized for 0ms Instant Rendering */
+.glass-panel {
+  background-color: #070d1e;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+}
+
+.glass-card {
+  background-color: #0b1329;
+  border: 1px solid rgba(99, 102, 241, 0.18);
+}
+
+.neo-card {
+  background: #0d1633;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.gold-gradient-text {
+  background: linear-gradient(135deg, #fffbeb 0%, #fde68a 25%, #f59e0b 65%, #d97706 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.emerald-gradient-text {
+  background: linear-gradient(135deg, #ecfdf5 0%, #a7f3d0 30%, #10b981 70%, #059669 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.indigo-gradient-text {
+  background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 30%, #818cf8 75%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.cyan-gradient-text {
+  background: linear-gradient(135deg, #ecfeff 0%, #a5f3fc 30%, #06b6d4 75%, #0891b2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* =========================================================================
+   LIGHT THEME OVERRIDES (Comprehensive, Crisp, High-Contrast Clean Daylight)
+   ========================================================================= */
+[data-theme="light"],
+.light,
+[data-theme="light"] body,
+.light body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+[data-theme="light"] div[dir="rtl"],
+.light div[dir="rtl"] {
+  color: #0f172a !important;
+}
+
+/* 1. Reset all dark containers, cards, and custom hex backgrounds */
+[data-theme="light"] .glass-panel,
+.light .glass-panel,
+[data-theme="light"] .glass-card,
+.light .glass-card,
+[data-theme="light"] .bg-\[\#060913\],
+.light .bg-\[\#060913\],
+[data-theme="light"] .bg-\[\#0c1426\],
+.light .bg-\[\#0c1426\],
+[data-theme="light"] .bg-\[\#0e172c\],
+.light .bg-\[\#0e172c\],
+[data-theme="light"] .bg-\[\#070b14\],
+.light .bg-\[\#070b14\],
+[data-theme="light"] .bg-\[\#080d17\],
+.light .bg-\[\#080d17\],
+[data-theme="light"] .bg-\[\#080d1a\],
+.light .bg-\[\#080d1a\],
+[data-theme="light"] .bg-\[\#090e17\],
+.light .bg-\[\#090e17\],
+[data-theme="light"] .bg-\[\#0a101d\],
+.light .bg-\[\#0a101d\],
+[data-theme="light"] .bg-\[\#0b0f19\],
+.light .bg-\[\#0b0f19\],
+[data-theme="light"] .bg-\[\#0c121e\],
+.light .bg-\[\#0c121e\],
+[data-theme="light"] .bg-\[\#0d1424\],
+.light .bg-\[\#0d1424\],
+[data-theme="light"] .bg-\[\#0d1424\]\/90,
+.light .bg-\[\#0d1424\]\/90,
+[data-theme="light"] .bg-\[\#0d1527\],
+.light .bg-\[\#0d1527\],
+[data-theme="light"] .bg-\[\#0f1728\],
+.light .bg-\[\#0f1728\],
+[data-theme="light"] .bg-\[\#101726\],
+.light .bg-\[\#101726\],
+[data-theme="light"] .bg-\[\#121926\],
+.light .bg-\[\#121926\],
+[data-theme="light"] .bg-\[\#070c17\],
+.light .bg-\[\#070c17\],
+[data-theme="light"] .bg-\[\#060a14\],
+.light .bg-\[\#060a14\],
+[data-theme="light"] .bg-\[\#070a11\],
+.light .bg-\[\#070a11\],
+[data-theme="light"] .bg-slate-900,
+.light .bg-slate-900,
+[data-theme="light"] .bg-slate-900\/90,
+.light .bg-slate-900\/90,
+[data-theme="light"] .bg-slate-900\/80,
+.light .bg-slate-900\/80,
+[data-theme="light"] .bg-slate-900\/60,
+.light .bg-slate-900\/60,
+[data-theme="light"] .bg-slate-900\/50,
+.light .bg-slate-900\/50,
+[data-theme="light"] .bg-slate-950,
+.light .bg-slate-950,
+[data-theme="light"] .bg-slate-950\/90,
+.light .bg-slate-950\/90,
+[data-theme="light"] .bg-slate-950\/80,
+.light .bg-slate-950\/80 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Reset Gradients that had dark backgrounds in dark mode */
+[data-theme="light"] .bg-gradient-to-r.from-\[\#101726\],
+.light .bg-gradient-to-r.from-\[\#101726\],
+[data-theme="light"] .bg-gradient-to-r.from-\[\#0d1628\],
+.light .bg-gradient-to-r.from-\[\#0d1628\] {
+  background-image: none !important;
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+}
+
+[data-theme="light"] .from-emerald-950\/80,
+.light .from-emerald-950\/80 {
+  background-image: none !important;
+  background-color: #ecfdf5 !important;
+  border-color: #a7f3d0 !important;
+}
+
+[data-theme="light"] .bg-slate-800,
+.light .bg-slate-800,
+[data-theme="light"] .bg-slate-800\/90,
+.light .bg-slate-800\/90,
+[data-theme="light"] .bg-slate-800\/80,
+.light .bg-slate-800\/80,
+[data-theme="light"] .bg-slate-800\/70,
+.light .bg-slate-800\/70,
+[data-theme="light"] .bg-slate-800\/60,
+.light .bg-slate-800\/60,
+[data-theme="light"] .bg-slate-800\/50,
+.light .bg-slate-800\/50 {
+  background-color: #f1f5f9 !important;
+  color: #1e293b !important;
+  border-color: #cbd5e1 !important;
+}
+
+/* 2. Top Header & Sidebar in Light Mode */
+[data-theme="light"] header,
+.light header {
+  background-color: rgba(255, 255, 255, 0.95) !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.05) !important;
+}
+
+[data-theme="light"] aside,
+.light aside {
+  background-color: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: -4px 0 15px rgba(0, 0, 0, 0.03) !important;
+}
+
+/* 3. Form Inputs, Selects, and Textareas */
+[data-theme="light"] input,
+.light input,
+[data-theme="light"] select,
+.light select,
+[data-theme="light"] textarea,
+.light textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+[data-theme="light"] input::placeholder,
+.light input::placeholder,
+[data-theme="light"] textarea::placeholder,
+.light textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+[data-theme="light"] option,
+.light option {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* 4. Text Contrast and Hierarchy */
+[data-theme="light"] .text-white,
+.light .text-white,
+[data-theme="light"] .text-slate-100,
+.light .text-slate-100,
+[data-theme="light"] .text-slate-200,
+.light .text-slate-200 {
+  color: #0f172a !important;
+}
+
+[data-theme="light"] .text-slate-300,
+.light .text-slate-300 {
+  color: #334155 !important;
+}
+
+[data-theme="light"] .text-slate-400,
+.light .text-slate-400 {
+  color: #64748b !important;
+}
+
+[data-theme="light"] .text-slate-500,
+.light .text-slate-500 {
+  color: #94a3b8 !important;
+}
+
+/* Gold Gradient Text in Light Mode */
+[data-theme="light"] .gold-gradient-text,
+.light .gold-gradient-text {
+  background: linear-gradient(135deg, #d97706 0%, #b45309 100%) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+}
+
+/* Amber / Gold Text */
+[data-theme="light"] .text-amber-400,
+.light .text-amber-400,
+[data-theme="light"] .text-amber-300,
+.light .text-amber-300 {
+  color: #b45309 !important;
+}
+
+/* Emerald Text */
+[data-theme="light"] .text-emerald-400,
+.light .text-emerald-400,
+[data-theme="light"] .text-emerald-300,
+.light .text-emerald-300 {
+  color: #047857 !important;
+}
+
+/* Rose Text */
+[data-theme="light"] .text-rose-400,
+.light .text-rose-400,
+[data-theme="light"] .text-rose-300,
+.light .text-rose-300 {
+  color: #be123c !important;
+}
+
+/* Sky/Cyan Text */
+[data-theme="light"] .text-cyan-400,
+.light .text-cyan-400,
+[data-theme="light"] .text-sky-400,
+.light .text-sky-400 {
+  color: #0369a1 !important;
+}
+
+/* 5. Badges, Chips, and Status Pills */
+[data-theme="light"] .bg-amber-500\/10,
+.light .bg-amber-500\/10,
+[data-theme="light"] .bg-amber-500\/15,
+.light .bg-amber-500\/15,
+[data-theme="light"] .bg-amber-500\/20,
+.light .bg-amber-500\/20 {
+  background-color: #fef3c7 !important;
+  color: #b45309 !important;
+  border-color: #fde68a !important;
+}
+
+[data-theme="light"] .bg-emerald-500\/10,
+.light .bg-emerald-500\/10,
+[data-theme="light"] .bg-emerald-500\/15,
+.light .bg-emerald-500\/15,
+[data-theme="light"] .bg-emerald-500\/20,
+.light .bg-emerald-500\/20 {
+  background-color: #d1fae5 !important;
+  color: #047857 !important;
+  border-color: #a7f3d0 !important;
+}
+
+[data-theme="light"] .bg-rose-500\/10,
+.light .bg-rose-500\/10,
+[data-theme="light"] .bg-rose-500\/15,
+.light .bg-rose-500\/15,
+[data-theme="light"] .bg-rose-500\/20,
+.light .bg-rose-500\/20 {
+  background-color: #ffe4e6 !important;
+  color: #be123c !important;
+  border-color: #fecdd3 !important;
+}
+
+[data-theme="light"] .bg-cyan-500\/10,
+.light .bg-cyan-500\/10,
+[data-theme="light"] .bg-sky-500\/10,
+.light .bg-sky-500\/10,
+[data-theme="light"] .bg-cyan-500\/15,
+.light .bg-cyan-500\/15,
+[data-theme="light"] .bg-cyan-500\/20,
+.light .bg-cyan-500\/20 {
+  background-color: #e0f2fe !important;
+  color: #0369a1 !important;
+  border-color: #bae6fd !important;
+}
+
+[data-theme="light"] .bg-purple-500\/10,
+.light .bg-purple-500\/10,
+[data-theme="light"] .bg-purple-500\/20,
+.light .bg-purple-500\/20 {
+  background-color: #f3e8ff !important;
+  color: #7e22ce !important;
+  border-color: #e9d5ff !important;
+}
+
+/* 6. Tables in Light Mode */
+[data-theme="light"] table thead tr,
+.light table thead tr {
+  background-color: #f1f5f9 !important;
+  border-bottom: 2px solid #cbd5e1 !important;
+}
+
+[data-theme="light"] table thead th,
+.light table thead th {
+  color: #0f172a !important;
+  font-weight: 800 !important;
+}
+
+[data-theme="light"] table tbody tr,
+.light table tbody tr {
+  background-color: #ffffff !important;
+  border-bottom: 1px solid #f1f5f9 !important;
+}
+
+[data-theme="light"] table tbody tr:hover,
+.light table tbody tr:hover {
+  background-color: #f8fafc !important;
+}
+
+[data-theme="light"] table tbody td,
+.light table tbody td {
+  color: #1e293b !important;
+  border-color: #f1f5f9 !important;
+}
+
+/* 7. Borders */
+[data-theme="light"] .border-slate-800,
+.light .border-slate-800,
+[data-theme="light"] .border-slate-700,
+.light .border-slate-700,
+[data-theme="light"] .border-slate-600,
+.light .border-slate-600 {
+  border-color: #e2e8f0 !important;
+}
+
+[data-theme="light"] .border-amber-500\/20,
+.light .border-amber-500\/20,
+[data-theme="light"] .border-amber-500\/25,
+.light .border-amber-500\/25,
+[data-theme="light"] .border-amber-500\/30,
+.light .border-amber-500\/30,
+[data-theme="light"] .border-amber-500\/40,
+.light .border-amber-500\/40 {
+  border-color: rgba(217, 119, 6, 0.3) !important;
+}
+
+/* 8. Modals Backdrop */
+[data-theme="light"] .fixed.inset-0.bg-black\/80,
+.light .fixed.inset-0.bg-black\/80,
+[data-theme="light"] .fixed.inset-0.bg-black\/75,
+.light .fixed.inset-0.bg-black\/75 {
+  background-color: rgba(15, 23, 42, 0.75) !important;
+}
+
+/* Custom Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.08);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(245, 158, 11, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.7);
+}
+
+/* Print Specific Rules for Flawless PDF & Grade Separation */
+@media print {
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .fixed.inset-0 {
+    position: static !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+  }
+
+  #printable-report-document {
+    box-shadow: none !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+  }
+
+  #printable-certificate {
+    box-shadow: none !important;
+    max-width: 100% !important;
+    margin: 0 auto !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  .page-break-grade {
+    page-break-after: always !important;
+    break-after: page !important;
+    margin-bottom: 2rem !important;
+  }
+
+  .page-break-grade:last-child {
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+
+  .page-break-avoid {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+
+  th, td {
+    border: 1px solid #cbd5e1 !important;
+    color: #0f172a !important;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(245, 158, 11, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(245, 158, 11, 0.45);
+  }
+}
+
+.glow-gold {
+  animation: pulseGlow 3s infinite ease-in-out;
+}
+
+/* Independent Isolated Smooth Scrollbars */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.6);
+}

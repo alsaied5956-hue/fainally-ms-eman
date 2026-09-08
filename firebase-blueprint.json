@@ -1,0 +1,195 @@
+{
+  "entities": {
+    "SystemState": {
+      "title": "SystemState",
+      "description": "The complete synced center management state including students, attendance records, payments, and configs.",
+      "type": "object",
+      "properties": {
+        "students": {
+          "type": "array",
+          "description": "List of registered students in the system."
+        },
+        "attendanceHistory": {
+          "type": "object",
+          "description": "Daily attendance history indexed by date string."
+        },
+        "attendanceToday": {
+          "type": "object",
+          "description": "Today's scanned attendance indexed by student barcode."
+        },
+        "scanLogTimes": {
+          "type": "object",
+          "description": "Scanned attendance timestamps."
+        },
+        "payments": {
+          "type": "object",
+          "description": "Monthly payment records for students."
+        },
+        "scanLogOrder": {
+          "type": "array",
+          "description": "Sequential order of scanned barcodes for today."
+        },
+        "usersList": {
+          "type": "array",
+          "description": "System accounts and permissions."
+        },
+        "groupPrices": {
+          "type": "object",
+          "description": "Monthly pricing configured per academic grade."
+        },
+        "activeSessionSlotId": {
+          "type": "string",
+          "description": "Active session time slot configuration."
+        },
+        "pendingWhatsAppMessages": {
+          "type": "array",
+          "description": "Offline WhatsApp outbox queue messages."
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last cloud synchronization."
+        }
+      }
+    },
+    "LiveEvent": {
+      "title": "LiveEvent",
+      "description": "Real-time lightweight attendance and scan event for the secondary notification system.",
+      "type": "object",
+      "properties": {
+        "studentId": {
+          "type": "string",
+          "description": "Barcode or ID of the student."
+        },
+        "status": {
+          "type": "string",
+          "description": "Attendance status (حضور, غياب, تأخير)."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds."
+        }
+      },
+      "required": ["studentId", "status", "timestamp"]
+    },
+    "ParentAccount": {
+      "title": "ParentAccount",
+      "description": "Registered parent account linked to one or more student barcodes.",
+      "type": "object",
+      "properties": {
+        "studentBarcode": {
+          "type": "string",
+          "description": "Primary student barcode."
+        },
+        "linkedBarcodes": {
+          "type": "array",
+          "description": "Additional children barcodes linked to this parent account."
+        },
+        "parentPhone": {
+          "type": "string",
+          "description": "Validated registered phone number."
+        },
+        "password": {
+          "type": "string",
+          "description": "Parent security password for login."
+        },
+        "status": {
+          "type": "string",
+          "description": "Account status: active or disabled."
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation date timestamp."
+        }
+      },
+      "required": ["studentBarcode", "parentPhone", "password", "status"]
+    },
+    "ParentChatMessage": {
+      "title": "ParentChatMessage",
+      "description": "Direct one-on-one message between parent and supervisor/admin.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique message ID."
+        },
+        "chatId": {
+          "type": "string",
+          "description": "Chat thread key (student barcode)."
+        },
+        "sender": {
+          "type": "string",
+          "description": "Message sender: parent or admin."
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Display name of sender."
+        },
+        "text": {
+          "type": "string",
+          "description": "Message content text."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Epoch timestamp in milliseconds."
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Read status flag."
+        }
+      },
+      "required": ["id", "chatId", "sender", "text", "timestamp"]
+    },
+    "AdminPortalSettings": {
+      "title": "AdminPortalSettings",
+      "description": "Configurable credentials and notification flags for the supervisor control panel.",
+      "type": "object",
+      "properties": {
+        "adminBarcode": {
+          "type": "string",
+          "description": "Supervisor barcode identifier."
+        },
+        "adminPassword": {
+          "type": "string",
+          "description": "Supervisor access password."
+        },
+        "pushNotificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether system-wide push notifications are active."
+        }
+      },
+      "required": ["adminBarcode", "adminPassword"]
+    }
+  },
+  "firestore": {
+    "/system_state/{stateId}": {
+      "schema": {
+        "$ref": "SystemState"
+      },
+      "description": "Stores system state and records for the educational center."
+    },
+    "/live_events/{docId}": {
+      "schema": {
+        "$ref": "LiveEvent"
+      },
+      "description": "Stores ultra-fast live scan events for the secondary parent notification system."
+    },
+    "/parent_accounts/{accountId}": {
+      "schema": {
+        "$ref": "ParentAccount"
+      },
+      "description": "Stores registered parent accounts and access credentials."
+    },
+    "/parent_chats/{chatDocId}": {
+      "schema": {
+        "$ref": "ParentChatMessage"
+      },
+      "description": "Stores direct real-time parent-supervisor chat messages."
+    },
+    "/portal_settings/{settingId}": {
+      "schema": {
+        "$ref": "AdminPortalSettings"
+      },
+      "description": "Stores supervisor credentials and push notification settings."
+    }
+  }
+}
