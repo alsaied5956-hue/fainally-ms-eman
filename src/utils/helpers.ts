@@ -1,16 +1,16 @@
-import { GradeName, GRADE_ORDER, Student, SessionSlot, PaymentRecord } from "../types";
+import { GradeName, GRADE_ORDER, Student, SessionSlot, PaymentRecord, GroupDays } from "../types";
 
 export const SCHOOL_WHATSAPP_PHONE = "201070642904";
 export const TEACHER_NAME = "الأستاذة إيمان الدمشيتي";
 
-// Base default monthly prices per grade
+// Base default monthly prices per grade (from actual system records)
 export const DEFAULT_GRADE_PRICES: Record<GradeName, number> = {
   "الصف الرابع الابتدائي": 100,
   "الصف الخامس الابتدائي": 100,
-  "الصف السادس الابتدائي": 120,
-  "الصف الأول الإعدادي": 140,
-  "الصف الثاني الإعدادي": 150,
-  "الصف الثالث الإعدادي": 160,
+  "الصف السادس الابتدائي": 100,
+  "الصف الأول الإعدادي": 120,
+  "الصف الثاني الإعدادي": 120,
+  "الصف الثالث الإعدادي": 150,
   "الصف الأول الثانوي": 180,
   "الصف الثاني الثانوي": 200,
   "الصف الثالث الثانوي": 220,
@@ -60,11 +60,61 @@ export function formatArabicDate(dateStr?: string): string {
 
 export function getArabicDayName(dateStr: string): string {
   try {
-    const d = new Date(dateStr);
+    const parts = dateStr.split("-").map(Number);
+    const d = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0) : new Date(dateStr);
     return d.toLocaleDateString("ar-EG", { weekday: "long" });
   } catch {
     return "";
   }
+}
+
+/**
+ * Determine official scheduled group for any given date:
+ * - Saturday (6), Monday (1), Wednesday (3) -> "سبت - إثنين - أربعاء"
+ * - Sunday (0), Tuesday (2), Thursday (4) -> "أحد - ثلاثاء - خميس"
+ * - Friday (5) -> Defaults to "سبت - إثنين - أربعاء" (weekly break)
+ */
+export function getGroupForDate(dateInput: string | Date = new Date()): GroupDays {
+  let d: Date;
+  if (dateInput instanceof Date) {
+    d = dateInput;
+  } else if (typeof dateInput === "string") {
+    const parts = dateInput.split("-").map(Number);
+    d = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0) : new Date(dateInput);
+  } else {
+    d = new Date();
+  }
+
+  const dayNum = d.getDay(); // 0 = Sun, 1 = Mon, 2 = Tue, 3 = Wed, 4 = Thu, 5 = Fri, 6 = Sat
+  if (dayNum === 6 || dayNum === 1 || dayNum === 3) {
+    return "سبت - إثنين - أربعاء";
+  }
+  if (dayNum === 0 || dayNum === 2 || dayNum === 4) {
+    return "أحد - ثلاثاء - خميس";
+  }
+  return "سبت - إثنين - أربعاء";
+}
+
+/**
+ * Check if date is an official attendance day for this student group
+ */
+export function isOfficialGroupDay(groupDays: string, dateInput: string | Date = new Date()): boolean {
+  let d: Date;
+  if (dateInput instanceof Date) {
+    d = dateInput;
+  } else if (typeof dateInput === "string") {
+    const parts = dateInput.split("-").map(Number);
+    d = parts.length === 3 ? new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0) : new Date(dateInput);
+  } else {
+    d = new Date();
+  }
+
+  const dayNum = d.getDay();
+  const isSatMonWed = groupDays.includes("سبت") || groupDays.includes("إثنين");
+  if (isSatMonWed) {
+    return dayNum === 6 || dayNum === 1 || dayNum === 3;
+  }
+  return dayNum === 0 || dayNum === 2 || dayNum === 4;
 }
 
 // Convert Arabic digits to English, remove non-digits, and normalize Egypt WhatsApp

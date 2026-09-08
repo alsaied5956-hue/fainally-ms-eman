@@ -29,6 +29,12 @@ const chatBus =
     ? new BroadcastChannel("eman_portal_chat_bus")
     : null;
 
+// Account events BroadcastChannel for instant cross-tab / cross-window remote logouts
+export const accountEventsBus =
+  typeof window !== "undefined" && "BroadcastChannel" in window
+    ? new BroadcastChannel("eman_portal_account_events")
+    : null;
+
 /**
  * Clean & normalize phone numbers for consistent Arabic Egyptian mobile matching
  */
@@ -124,6 +130,25 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
   accounts[account.studentBarcode] = account;
   saveLocalParentAccounts(accounts);
 
+  // If status is disabled, immediately broadcast revocation to log out parent device
+  if (account.status === "disabled") {
+    accountEventsBus?.postMessage({
+      type: "ACCOUNT_REVOKED",
+      barcode: account.studentBarcode,
+      reason: "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.",
+    });
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("eman_account_revoked", {
+          detail: {
+            barcode: account.studentBarcode,
+            reason: "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.",
+          },
+        })
+      );
+    }
+  }
+
   try {
     await ensureFirebaseAuth();
     if (db) {
@@ -142,12 +167,29 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
 }
 
 /**
- * Delete / Reset parent account (forces first-time registration again)
+ * Delete / Reset parent account (forces first-time registration again and remote logout)
  */
 export async function deleteParentAccount(studentBarcode: string): Promise<void> {
   const accounts = getLocalParentAccounts();
   delete accounts[studentBarcode];
   saveLocalParentAccounts(accounts);
+
+  // Broadcast revocation immediately to disconnect parent session on their device
+  accountEventsBus?.postMessage({
+    type: "ACCOUNT_REVOKED",
+    barcode: studentBarcode,
+    reason: "تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.",
+  });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("eman_account_revoked", {
+        detail: {
+          barcode: studentBarcode,
+          reason: "تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.",
+        },
+      })
+    );
+  }
 
   try {
     await ensureFirebaseAuth();
@@ -162,6 +204,112 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
   } catch (err) {
     console.warn("Cloud parent account delete warning:", err);
   }
+}
+
+/**
+ * Realtime multi-layered listener that monitors account status on parent device:
+ * 1. BroadcastChannel (cross-tab / sub-millisecond)
+ * 2. Custom window events (same tab)
+ * 3. LocalStorage storage event (browser-wide)
+ * 4. Firestore onSnapshot on the parent_accounts document (cross-device / mobile to PC)
+ * 5. Periodic fallback safety interval
+ */
+export function subscribeToParentAccountLiveStatus(
+  studentBarcode: string,
+  onRevoked: (reason: string) => void
+): () => void {
+  const targetBarcode = String(studentBarcode).trim();
+  let isCancelled = false;
+
+  // 1. BroadcastChannel listener (same device / multi-tab)
+  const handleBusMessage = (ev: MessageEvent) => {
+    if (
+      ev.data?.type === "ACCOUNT_REVOKED" &&
+      String(ev.data?.barcode).trim() === targetBarcode
+    ) {
+      onRevoked(ev.data.reason || "تم تعطيل أو حذف الحساب من قِبل إدارة المنظومة.");
+    }
+  };
+  accountEventsBus?.addEventListener("message", handleBusMessage);
+
+  // 2. Window event listener (same tab)
+  const handleWindowEvent = (ev: Event) => {
+    const customEv = ev as CustomEvent;
+    if (String(customEv.detail?.barcode).trim() === targetBarcode) {
+      onRevoked(customEv.detail.reason || "تم تعطيل أو حذف الحساب من قِبل إدارة المنظومة.");
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("eman_account_revoked", handleWindowEvent);
+  }
+
+  // 3. Storage event listener (cross-tab LocalStorage modification)
+  const handleStorageEvent = (ev: StorageEvent) => {
+    if (ev.key === LS_PARENT_ACCOUNTS && ev.newValue) {
+      try {
+        const accs = JSON.parse(ev.newValue) as Record<string, ParentAccount>;
+        const acc = accs[targetBarcode];
+        if (!acc) {
+          onRevoked("تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.");
+        } else if (acc.status === "disabled") {
+          onRevoked("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+        }
+      } catch {}
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorageEvent);
+  }
+
+  // 4. Firestore Realtime Listener for cross-device mobile sync
+  let unsubscribeDoc: (() => void) | null = null;
+  ensureFirebaseAuth()
+    .then(() => {
+      if (isCancelled || !db) return;
+      try {
+        unsubscribeDoc = onSnapshot(
+          doc(db, "parent_accounts", targetBarcode),
+          (snap) => {
+            if (!snap.exists()) {
+              onRevoked("تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.");
+            } else {
+              const data = snap.data() as ParentAccount;
+              if (data && data.status === "disabled") {
+                onRevoked("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+              }
+            }
+          },
+          (err) => {
+            console.warn("Firestore parent live listener warning:", err);
+          }
+        );
+      } catch (e) {
+        console.warn("Failed to attach Firestore snapshot listener:", e);
+      }
+    })
+    .catch(() => {});
+
+  // 5. Periodic fallback check every 3 seconds
+  const intervalId = setInterval(() => {
+    const localAccounts = getLocalParentAccounts();
+    const acc = localAccounts[targetBarcode];
+    if (!acc) {
+      onRevoked("تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.");
+    } else if (acc.status === "disabled") {
+      onRevoked("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+    }
+  }, 3000);
+
+  return () => {
+    isCancelled = true;
+    accountEventsBus?.removeEventListener("message", handleBusMessage);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("eman_account_revoked", handleWindowEvent);
+      window.removeEventListener("storage", handleStorageEvent);
+    }
+    if (unsubscribeDoc) unsubscribeDoc();
+    clearInterval(intervalId);
+  };
 }
 
 /**

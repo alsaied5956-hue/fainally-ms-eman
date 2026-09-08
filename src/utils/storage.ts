@@ -107,21 +107,65 @@ export const DEFAULT_USERS: UserAccount[] = [
     role: "admin",
     permissions: [...ALL_PERMISSIONS],
   },
+  {
+    username: "alsaied",
+    pass: "159357",
+    role: "admin",
+    permissions: [...ALL_PERMISSIONS],
+  },
+  {
+    username: "mahmoud",
+    pass: "1234",
+    role: "admin",
+    permissions: [
+      "add_student",
+      "edit_student",
+      "delete_student",
+      "change_status",
+      "pay_expenses",
+      "view_revenues",
+      "add_grades",
+      "send_messages",
+      "manage_prices",
+      "early_warning",
+      "certificates",
+      "excel_integration",
+    ],
+  },
+  {
+    username: "eman",
+    pass: "2468",
+    role: "admin",
+    permissions: [
+      "add_student",
+      "edit_student",
+      "delete_student",
+      "change_status",
+      "pay_expenses",
+      "view_revenues",
+      "add_grades",
+      "send_messages",
+      "manage_prices",
+      "early_warning",
+      "certificates",
+      "excel_integration",
+    ],
+  },
 ];
 
 export const INITIAL_SYSTEM_DATA: SystemData = {
-  students: [],
-  attendanceHistory: {},
-  attendanceToday: {},
+  students: Array.isArray(centerBackup?.students) ? (centerBackup.students as any[]) : [],
+  attendanceHistory: (centerBackup?.attendanceHistory as Record<string, Record<string, string>>) || {},
+  attendanceToday: (centerBackup?.attendanceToday as Record<string, string>) || {},
   scanLogTimes: {},
-  payments: {},
+  payments: normalizeAndMigratePayments((centerBackup as any)?.payments),
   scanLogOrder: [],
   usersList: DEFAULT_USERS,
-  groupPrices: DEFAULT_GRADE_PRICES,
+  groupPrices: { ...DEFAULT_GRADE_PRICES, ...((centerBackup?.groupPrices as Record<string, number>) || {}) },
   activeSessionSlotId: "auto",
   platformMessages: [],
-  pendingWhatsAppMessages: [],
-  gradeWhatsAppLinks: {},
+  pendingWhatsAppMessages: Array.isArray(centerBackup?.pendingWhatsAppMessages) ? (centerBackup.pendingWhatsAppMessages as any[]) : [],
+  gradeWhatsAppLinks: (centerBackup?.gradeWhatsAppLinks as Record<string, string>) || {},
   deletedBarcodes: [],
   scanLogUpdatedAt: Date.now(),
   updatedAt: Date.now(),
@@ -374,17 +418,32 @@ export function loadLocalData(): SystemData {
       }
     } catch {}
 
+    const backupStudents = Array.isArray(centerBackup?.students) ? (centerBackup.students as any[]) : [];
+    const backupHistory = (centerBackup?.attendanceHistory as Record<string, Record<string, string>>) || {};
+    const backupToday = (centerBackup?.attendanceToday as Record<string, string>) || {};
+    const backupPrices = (centerBackup?.groupPrices as Record<string, number>) || {};
+    const backupPayments = normalizeAndMigratePayments((centerBackup as any)?.payments);
+    const backupUsers = Array.isArray((centerBackup as any)?.usersList) ? ((centerBackup as any).usersList as any[]) : [];
+    const backupLinks = ((centerBackup as any)?.gradeWhatsAppLinks as Record<string, string>) || {};
+
     const normalizedPrimaryPayments = normalizeAndMigratePayments(parsed.payments);
     const normalizedLegacyPayments = normalizeAndMigratePayments(legacyPayments);
 
-    // Merge both payments sources seamlessly
+    // Merge backup payments, legacy payments, and primary payments
     const mergedPayments: Record<string, Record<string, PaymentRecord>> = {
+      ...backupPayments,
       ...normalizedLegacyPayments,
       ...normalizedPrimaryPayments,
     };
+    for (const [mKey, recMap] of Object.entries(backupPayments)) {
+      mergedPayments[mKey] = {
+        ...(mergedPayments[mKey] || {}),
+        ...recMap,
+      };
+    }
     for (const [mKey, recMap] of Object.entries(normalizedPrimaryPayments)) {
       mergedPayments[mKey] = {
-        ...(normalizedLegacyPayments[mKey] || {}),
+        ...(mergedPayments[mKey] || {}),
         ...recMap,
       };
     }
@@ -416,19 +475,36 @@ export function loadLocalData(): SystemData {
         }))
       : [];
 
-    const backupStudents = Array.isArray(centerBackup?.students) ? (centerBackup.students as any[]) : [];
-    const backupHistory = (centerBackup?.attendanceHistory as Record<string, Record<string, string>>) || {};
-    const backupToday = (centerBackup?.attendanceToday as Record<string, string>) || {};
-    const backupPrices = (centerBackup?.groupPrices as Record<string, number>) || {};
+    // Ensure all 728 actual students from backup are guaranteed and merged with local edits
+    const studentMap = new Map<string, any>();
+    backupStudents.forEach((s) => {
+      if (s && s.barcode) studentMap.set(String(s.barcode).trim(), s);
+    });
+    if (Array.isArray(parsed.students) && parsed.students.length > 0) {
+      parsed.students.forEach((s: any) => {
+        if (s && s.barcode) {
+          const b = String(s.barcode).trim();
+          const existing = studentMap.get(b);
+          studentMap.set(b, existing ? { ...existing, ...s } : s);
+        }
+      });
+    }
+    const deletedSet = new Set((parsed.deletedBarcodes || []).map(String));
+    const finalStudents = Array.from(studentMap.values()).filter(
+      (s) => !deletedSet.has(String(s.barcode).trim())
+    );
 
-    const hasLocalStudents = Array.isArray(parsed.students) && parsed.students.length > 0;
-    const isExplicitlyCleared = Array.isArray(parsed.deletedBarcodes) && parsed.deletedBarcodes.length > 0;
-    const finalStudents = hasLocalStudents
-      ? parsed.students
-      : (!isExplicitlyCleared && backupStudents.length > 0 ? backupStudents : []);
+    // Merge user accounts
+    const userMap = new Map<string, UserAccount>();
+    DEFAULT_USERS.forEach((u) => userMap.set(u.username, u));
+    backupUsers.forEach((u) => userMap.set(u.username, u));
+    if (Array.isArray(parsed.usersList)) {
+      parsed.usersList.forEach((u: UserAccount) => userMap.set(u.username, u));
+    }
+    const finalUsers = Array.from(userMap.values());
 
     const loaded: SystemData = {
-      students: finalStudents,
+      students: finalStudents.length > 0 ? finalStudents : backupStudents,
       attendanceHistory: {
         ...backupHistory,
         ...(parsed.attendanceHistory || {}),
@@ -437,11 +513,12 @@ export function loadLocalData(): SystemData {
       scanLogTimes: filteredScanTimes,
       payments: mergedPayments,
       scanLogOrder: initialScanOrder,
-      usersList: Array.isArray(parsed.usersList) && parsed.usersList.length > 0 ? parsed.usersList : DEFAULT_USERS,
+      usersList: finalUsers,
       groupPrices: { ...DEFAULT_GRADE_PRICES, ...backupPrices, ...(parsed.groupPrices || {}) },
       activeSessionSlotId: parsed.activeSessionSlotId || "auto",
       platformMessages: rawPlatformMessages,
       pendingWhatsAppMessages: Array.isArray(parsed.pendingWhatsAppMessages) ? parsed.pendingWhatsAppMessages : [],
+      gradeWhatsAppLinks: { ...backupLinks, ...(parsed.gradeWhatsAppLinks || {}) },
       deletedBarcodes: Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [],
       scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
       updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),

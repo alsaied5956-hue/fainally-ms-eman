@@ -11,6 +11,8 @@ import {
   openWhatsApp,
   evaluateAttendanceStatus,
   isStudentPaid,
+  getGroupForDate,
+  isOfficialGroupDay,
 } from "../utils/helpers";
 import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
@@ -106,7 +108,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       const saved = localStorage.getItem("aiman_scanner_days") as GroupDays;
       if (saved === "سبت - إثنين - أربعاء" || saved === "أحد - ثلاثاء - خميس") return saved;
     }
-    return "سبت - إثنين - أربعاء";
+    // Auto-detect group schedule matching today's actual day of week
+    return getGroupForDate(new Date());
   });
 
   const [barcodeInput, setBarcodeInput] = useState("");
@@ -327,15 +330,24 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     playBeep("success");
     speakArabicGreeting(student.name, voiceEnabled);
 
+    const isOfficialDay = isOfficialGroupDay(student.groupDays, now);
     const isCrossDay = student.groupDays !== selectedDays;
+
+    let groupDayNote = `المجموعة: ${student.groupGrade} | ${student.groupDays}`;
+    if (!isOfficialDay) {
+      groupDayNote = `🔄 حضور تعويضي: اليوم ليس اليوم الرسمي لمجموعة الطالب (${student.groupDays})`;
+    } else if (isCrossDay) {
+      groupDayNote = `🔄 طالب تعويض أيام لنفس الصف (${student.groupGrade} - ${student.groupDays})`;
+    } else {
+      groupDayNote = `✅ حضور في اليوم الرسمي للمجموعة (${student.groupGrade} - ${student.groupDays})`;
+    }
+
     setScanAlert({
       type: "success",
       title: calculatedStatus === "تأخير"
         ? `🟡 تسجيل دخول متأخر: ${student.name}`
         : `🟢 أهلاً بك يا ${student.name} (حضور في الموعد)`,
-      message: isCrossDay
-        ? `🔄 طالب تعويض أيام لنفس الصف (${student.groupGrade} - ${student.groupDays})`
-        : `المجموعة: ${student.groupGrade} | ${student.groupDays}`,
+      message: groupDayNote,
       student,
       time: nowTimeStr,
       status: calculatedStatus,

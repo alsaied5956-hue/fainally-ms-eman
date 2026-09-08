@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Student, PaymentRecord } from "../../types";
 import { ParentAccount, PortalSession } from "../../types/portal";
 import {
   getSavedPortalSession,
   savePortalSession,
   syncParentAccountsFromCloud,
+  subscribeToParentAccountLiveStatus,
 } from "../../utils/portalStorage";
 import { PortalAuthScreen } from "./PortalAuthScreen";
 import { ParentPortalDashboard } from "./ParentPortalDashboard";
@@ -30,10 +31,49 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     return getSavedPortalSession();
   });
 
+  // Notice when session is revoked remotely by admin (disable or delete)
+  const [revocationNotice, setRevocationNotice] = useState<string | null>(null);
+
   // Sync latest cloud accounts registry on mount
   useEffect(() => {
     syncParentAccountsFromCloud().catch(() => {});
   }, []);
+
+  // Handle logout
+  const handleLogout = useCallback((keepNotice: boolean = true) => {
+    setSession(null);
+    savePortalSession(null);
+    if (!keepNotice) {
+      setRevocationNotice(null);
+    }
+  }, []);
+
+  // Live remote logout watcher:
+  // If admin disables or deletes account, or removes student from system, force remote logout immediately
+  useEffect(() => {
+    if (session?.role !== "parent" || !session.account?.studentBarcode) {
+      return;
+    }
+
+    const currentBarcode = String(session.account.studentBarcode).trim();
+
+    // 1. Check if student was completely deleted from school roster
+    if (students.length > 0 && !students.some((s) => String(s.barcode).trim() === currentBarcode)) {
+      setRevocationNotice("تم حذف الطالب من منظومة المركز، وتم تسجيل الخروج تلقائياً.");
+      handleLogout(true);
+      return;
+    }
+
+    // 2. Realtime listener across Firestore, BroadcastChannel, and storage events
+    const unsubscribe = subscribeToParentAccountLiveStatus(currentBarcode, (reason) => {
+      setRevocationNotice(reason);
+      handleLogout(true);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [session, students, handleLogout]);
 
   // Handle successful login from AuthScreen
   const handleLoginSuccess = (
@@ -41,6 +81,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     account?: ParentAccount,
     barcode?: string
   ) => {
+    setRevocationNotice(null);
     const newSession: PortalSession = {
       role,
       account,
@@ -49,12 +90,6 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     };
     setSession(newSession);
     savePortalSession(newSession);
-  };
-
-  // Handle logout
-  const handleLogout = () => {
-    setSession(null);
-    savePortalSession(null);
   };
 
   // Update parent account in session state
@@ -75,6 +110,8 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
       <PortalAuthScreen
         students={students}
         onLoginSuccess={handleLoginSuccess}
+        revocationNotice={revocationNotice}
+        onClearRevocationNotice={() => setRevocationNotice(null)}
       />
     );
   }
@@ -84,7 +121,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     return (
       <AdminControlPanel
         students={students}
-        onLogout={handleLogout}
+        onLogout={() => handleLogout(false)}
       />
     );
   }
@@ -99,17 +136,19 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
         attendanceToday={attendanceToday}
         payments={payments}
         scanLogTimes={scanLogTimes}
-        onLogout={handleLogout}
+        onLogout={() => handleLogout(false)}
         onUpdateAccount={handleUpdateAccount}
       />
     );
   }
 
-  // Fallback fallback if account data was missing
+  // Fallback if account data was missing
   return (
     <PortalAuthScreen
       students={students}
       onLoginSuccess={handleLoginSuccess}
+      revocationNotice={revocationNotice}
+      onClearRevocationNotice={() => setRevocationNotice(null)}
     />
   );
 };

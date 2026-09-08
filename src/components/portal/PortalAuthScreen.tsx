@@ -23,11 +23,15 @@ import {
 interface PortalAuthScreenProps {
   students: Student[];
   onLoginSuccess: (role: "parent" | "admin", account?: ParentAccount, barcode?: string) => void;
+  revocationNotice?: string | null;
+  onClearRevocationNotice?: () => void;
 }
 
 export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
   students,
   onLoginSuccess,
+  revocationNotice,
+  onClearRevocationNotice,
 }) => {
   const [activeTab, setActiveTab] = useState<"login" | "register">("login");
 
@@ -182,6 +186,31 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
               <span>تفعيل حساب جديد (أول مرة)</span>
             </button>
           </div>
+
+          {/* Remote Logout Revocation Notice */}
+          {revocationNotice && (
+            <div className="p-4 rounded-2xl bg-rose-950/80 border-2 border-rose-500/60 text-rose-200 text-xs shadow-xl animate-fadeIn flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 shrink-0 text-rose-400 mt-0.5" />
+              <div className="flex-1 space-y-1">
+                <p className="font-black text-rose-300 text-sm">
+                  ⚠️ تم تسجيل الخروج التلقائي من حساب ولي الأمر
+                </p>
+                <p className="text-slate-300 leading-relaxed font-tajawal">
+                  {revocationNotice}
+                </p>
+              </div>
+              {onClearRevocationNotice && (
+                <button
+                  type="button"
+                  onClick={onClearRevocationNotice}
+                  className="text-rose-400 hover:text-white p-1 rounded-lg hover:bg-rose-500/20 transition cursor-pointer"
+                  title="إغلاق التنبيه"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Feedback Messages */}
           {errorMsg && (

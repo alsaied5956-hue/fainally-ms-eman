@@ -131,6 +131,9 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   const [chatSearch, setChatSearch] = useState("");
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
+  // Live real-time action feedback for activate, disable, delete with remote logout notification
+  const [liveActionFeedback, setLiveActionFeedback] = useState<string | null>(null);
+
   // Initial cloud sync
   useEffect(() => {
     handleCloudSync();
@@ -402,23 +405,68 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   };
 
   // Action: Toggle Disable/Enable
-  const handleToggleStatus = async (item: { barcode: string; account?: ParentAccount; status: string }) => {
+  const handleToggleStatus = async (item: {
+    barcode: string;
+    account?: ParentAccount;
+    status: string;
+    studentName?: string;
+  }) => {
     if (!item.account) return;
     const nextStatus = item.status === "active" ? "disabled" : "active";
-    const updated: ParentAccount = { ...item.account, status: nextStatus };
+    const updated: ParentAccount = {
+      ...item.account,
+      status: nextStatus,
+      updatedAt: new Date().toISOString(),
+    };
     await persistParentAccount(updated);
     reloadAccounts();
+    if (nextStatus === "disabled") {
+      setLiveActionFeedback(
+        `🔒 تم تعطيل حساب الطالب (${item.studentName || item.barcode}) بنجاح، وتم تسجيل خروج ولي الأمر تلقائياً من هاتفه.`
+      );
+    } else {
+      setLiveActionFeedback(
+        `✅ تم إعادة تفعيل حساب الطالب (${item.studentName || item.barcode}) بنجاح.`
+      );
+    }
+    setTimeout(() => setLiveActionFeedback(null), 6000);
   };
 
-  // Action: Delete / Reset Account (forces unactivated status again)
+  // Action: Delete / Reset Account (forces unactivated status again & automatic remote logout)
   const handleDeleteAccount = async (barcode: string, studentName: string) => {
     const confirmed = window.confirm(
-      `هل أنت متأكد من إلغاء تفعيل حساب ولي أمر الطالب (${studentName})؟\n\nسيعود الحساب إلى حالة (غير مفعل)، ويمكنك تفعيله لاحقاً بكلمة مرور جديدة أو يمكن لولي الأمر التسجيل برقم الهاتف.`
+      `هل أنت متأكد من حذف أو إلغاء تفعيل حساب ولي أمر الطالب (${studentName})؟\n\nسيعود الحساب إلى حالة (غير مفعل)، وسيتم تسجيل خروج ولي الأمر فوراً وتلقائياً من هاتفه المحمول.`
     );
     if (!confirmed) return;
 
     await deleteParentAccount(barcode);
     reloadAccounts();
+    setLiveActionFeedback(
+      `🗑️ تم حذف حساب ولي أمر (${studentName}) وإلغاء تفعيله، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
+    );
+    setTimeout(() => setLiveActionFeedback(null), 6000);
+  };
+
+  // Action: Quick Direct Activate with Default Credentials
+  const handleQuickActivate = async (item: {
+    barcode: string;
+    studentName: string;
+    parentPhone: string;
+  }) => {
+    try {
+      await activateParentAccountDirectly(
+        item.barcode,
+        item.parentPhone || "0",
+        "1234"
+      );
+      reloadAccounts();
+      setLiveActionFeedback(
+        `⚡ تم تفعيل حساب ولي أمر (${item.studentName}) بنجاح بكلمة المرور الافتراضية (1234).`
+      );
+      setTimeout(() => setLiveActionFeedback(null), 6000);
+    } catch {
+      setLiveActionFeedback("حدث خطأ أثناء التفعيل السريع.");
+    }
   };
 
   // Action: Open Edit Credentials Modal
@@ -687,6 +735,23 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
               </div>
             </div>
 
+            {/* Live Action Notification Banner */}
+            {liveActionFeedback && (
+              <div className="p-4 rounded-2xl bg-indigo-950/90 border-2 border-indigo-500/50 text-indigo-200 text-xs sm:text-sm font-bold flex items-center justify-between shadow-2xl animate-fadeIn font-tajawal">
+                <div className="flex items-center gap-2.5">
+                  <Sparkles className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>{liveActionFeedback}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLiveActionFeedback(null)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-indigo-900/50 transition cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Actions Bar & Global Controls */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xl flex flex-wrap items-center justify-between gap-3">
               {/* Search Bar */}
@@ -881,15 +946,26 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                             <div className="flex items-center justify-center gap-1.5">
                               {/* Unactivated State Actions */}
                               {isUnactivated && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenActivateModal(item)}
-                                  className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-md flex items-center gap-1 cursor-pointer"
-                                  title="تفعيل حساب ولي أمر هذا الطالب وتعيين كلمة المرور"
-                                >
-                                  <Zap className="w-3.5 h-3.5" />
-                                  <span>تفعيل الحساب</span>
-                                </button>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQuickActivate(item)}
+                                    className="px-2 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-bold text-xs transition shadow-sm flex items-center gap-1 cursor-pointer"
+                                    title="تفعيل فوري بكلمة مرور (1234)"
+                                  >
+                                    <Zap className="w-3.5 h-3.5" />
+                                    <span className="hidden sm:inline">سريع (1234)</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenActivateModal(item)}
+                                    className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-md flex items-center gap-1 cursor-pointer"
+                                    title="تفعيل مخصص وتعيين كلمة المرور"
+                                  >
+                                    <UserCheck className="w-3.5 h-3.5" />
+                                    <span>تفعيل الحساب</span>
+                                  </button>
+                                </div>
                               )}
 
                               {/* Active State Actions */}
@@ -905,24 +981,24 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                                     <Edit className="w-3.5 h-3.5" />
                                   </button>
 
-                                  {/* Disable Account */}
+                                  {/* Disable Account (Forces Remote Logout) */}
                                   <button
                                     type="button"
                                     onClick={() => handleToggleStatus(item)}
-                                    className="p-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 transition cursor-pointer"
-                                    title="تعطيل الحساب مؤقتاً"
+                                    className="p-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 hover:text-amber-200 transition cursor-pointer"
+                                    title="تعطيل الحساب مؤقتاً وتسجيل خروج هاتف ولي الأمر تلقائياً"
                                   >
                                     <UserX className="w-3.5 h-3.5" />
                                   </button>
 
-                                  {/* Reset to unactivated */}
+                                  {/* Delete / Reset to unactivated (Forces Remote Logout) */}
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteAccount(item.barcode, item.studentName)}
-                                    className="p-1.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 border border-slate-700 text-slate-400 hover:text-rose-300 transition cursor-pointer"
-                                    title="إلغاء التفعيل وإعادة ضبط الحساب"
+                                    className="p-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/25 text-rose-400 hover:text-rose-200 transition cursor-pointer"
+                                    title="إزالة / حذف الحساب نهائياً وتسجيل خروج ولي الأمر تلقائياً"
                                   >
-                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    <Trash2 className="w-3.5 h-3.5" />
                                   </button>
                                 </>
                               )}
@@ -935,7 +1011,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                                     type="button"
                                     onClick={() => handleToggleStatus(item)}
                                     className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition shadow-md flex items-center gap-1 cursor-pointer"
-                                    title="إعادة تفعيل الحساب للنشاط"
+                                    title="إعادة تفعيل الحساب للنشاط والسماح لولي الأمر بالدخول"
                                   >
                                     <UserCheck className="w-3.5 h-3.5" />
                                     <span>إعادة تفعيل</span>
@@ -956,7 +1032,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                                     type="button"
                                     onClick={() => handleDeleteAccount(item.barcode, item.studentName)}
                                     className="p-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 transition cursor-pointer"
-                                    title="حذف الحساب وإلغاء تفعيله"
+                                    title="حذف الحساب نهائياً"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </button>
