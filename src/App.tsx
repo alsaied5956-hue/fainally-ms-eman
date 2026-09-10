@@ -92,6 +92,7 @@ import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./utils/liveEv
 import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide-react";
 import { PortalMasterApp } from "./components/portal/PortalMasterApp";
 import { deleteParentAccount } from "./utils/portalStorage";
+import { PWAUpdateNotification } from "./components/portal/PWAUpdateNotification";
 
 export default function App() {
   const [appViewMode, setAppViewMode] = useState<"portal" | "teacher">(() => {
@@ -1571,6 +1572,7 @@ export default function App() {
   if (appViewMode === "portal") {
     return (
       <div dir="rtl" className="min-h-screen w-full overflow-y-auto bg-[#050711]">
+        <PWAUpdateNotification />
         <PortalMasterApp
           students={students}
           attendanceToday={attendanceToday}
@@ -1593,6 +1595,7 @@ export default function App() {
           : "bg-[#070b14] text-slate-100"
       } font-['Readex_Pro','Cairo',sans-serif] selection:bg-amber-500 selection:text-black`}
     >
+      <PWAUpdateNotification />
       {/* 1. Auth Overlay (Login) */}
       {!currentUser && (
         <AuthOverlay
