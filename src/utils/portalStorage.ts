@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, onSnapshot, updateDoc, deleteDoc, collection } from "firebase/firestore";
+import { doc, getDoc, getDocs, setDoc, onSnapshot, updateDoc, deleteDoc, collection } from "firebase/firestore";
 import { db, ensureFirebaseAuth } from "./firebase";
 import { Student } from "../types";
 import {
@@ -6,6 +6,7 @@ import {
   ParentChatMessage,
   AdminPortalSettings,
   PortalSession,
+  AdminActivityLog,
 } from "../types/portal";
 import { playPortalAudioChime } from "./portalNotifications";
 import { loadLocalData } from "./storage";
@@ -15,6 +16,7 @@ const LS_PARENT_ACCOUNTS = "eman_parent_accounts";
 const LS_PORTAL_CHATS = "eman_portal_chats";
 const LS_PORTAL_SETTINGS = "eman_portal_settings";
 const LS_PORTAL_SESSION = "eman_portal_session";
+const LS_ADMIN_LOGS = "eman_admin_activity_log";
 
 // Default Initial Supervisor Credentials
 export const DEFAULT_ADMIN_SETTINGS: AdminPortalSettings = {
@@ -36,6 +38,12 @@ export const accountEventsBus =
     ? new BroadcastChannel("eman_portal_account_events")
     : null;
 
+// Supervisor activity bus for instant cross-tab supervisor updates
+export const activityBus =
+  typeof window !== "undefined" && "BroadcastChannel" in window
+    ? new BroadcastChannel("eman_portal_activity_bus")
+    : null;
+
 /**
  * Clean & normalize phone numbers for consistent Arabic Egyptian mobile matching
  */
@@ -52,6 +60,130 @@ export function normalizePhone(raw?: string): string {
     digits = digits.slice(1);
   }
   return digits;
+}
+
+/**
+ * Supervisor Activity Log functions (Cross-device synchronized audit trail)
+ * Strictly visible to supervisors, never shown to parents.
+ */
+export function getAdminActivityLogs(): AdminActivityLog[] {
+  try {
+    const raw = localStorage.getItem(LS_ADMIN_LOGS);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return [];
+}
+
+export function saveAdminActivityLogs(logs: AdminActivityLog[]): void {
+  try {
+    localStorage.setItem(LS_ADMIN_LOGS, JSON.stringify(logs.slice(0, 100)));
+  } catch {}
+}
+
+export function logSupervisorAccountEvent(
+  type: AdminActivityLog["type"],
+  studentBarcode: string,
+  studentName: string,
+  details: string
+): void {
+  const timeFormatted = new Intl.DateTimeFormat("ar-EG", {
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: true,
+  }).format(new Date());
+
+  const newLog: AdminActivityLog = {
+    id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+    type,
+    studentBarcode,
+    studentName: studentName || studentBarcode,
+    timestamp: Date.now(),
+    timeFormatted,
+    details,
+  };
+
+  const logs = getAdminActivityLogs();
+  logs.unshift(newLog);
+  saveAdminActivityLogs(logs);
+
+  activityBus?.postMessage({ type: "new_activity", log: newLog });
+
+  // Sync to Firestore without blocking
+  ensureFirebaseAuth()
+    .then(async () => {
+      if (!db) return;
+      await setDoc(
+        doc(db, "system_state", "admin_audit_logs"),
+        { logs: logs.slice(0, 100), updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+    })
+    .catch(() => {});
+}
+
+export function subscribeToAdminActivityLogs(
+  onUpdate: (logs: AdminActivityLog[]) => void
+): () => void {
+  let isCancelled = false;
+
+  // 1. Initial local load
+  onUpdate(getAdminActivityLogs());
+
+  // 2. BroadcastChannel listener
+  const handleBus = (ev: MessageEvent) => {
+    if (isCancelled) return;
+    if (ev.data?.type === "new_activity") {
+      onUpdate(getAdminActivityLogs());
+    }
+  };
+  activityBus?.addEventListener("message", handleBus);
+
+  // 3. Storage event
+  const handleStorage = (ev: StorageEvent) => {
+    if (isCancelled) return;
+    if (ev.key === LS_ADMIN_LOGS && ev.newValue) {
+      try {
+        onUpdate(JSON.parse(ev.newValue));
+      } catch {}
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorage);
+  }
+
+  // 4. Firestore live subscription
+  let unsubFirestore: (() => void) | null = null;
+  ensureFirebaseAuth()
+    .then(() => {
+      if (isCancelled || !db) return;
+      unsubFirestore = onSnapshot(
+        doc(db, "system_state", "admin_audit_logs"),
+        (snap) => {
+          if (isCancelled) return;
+          if (snap.exists()) {
+            const cloudLogs = snap.data()?.logs as AdminActivityLog[] | undefined;
+            if (cloudLogs && Array.isArray(cloudLogs)) {
+              saveAdminActivityLogs(cloudLogs);
+              onUpdate(cloudLogs);
+            }
+          }
+        },
+        (err) => {
+          console.warn("Audit log subscription notice:", err);
+        }
+      );
+    })
+    .catch(() => {});
+
+  return () => {
+    isCancelled = true;
+    activityBus?.removeEventListener("message", handleBus);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", handleStorage);
+    }
+    if (unsubFirestore) unsubFirestore();
+  };
 }
 
 /**
@@ -101,14 +233,15 @@ export function saveLocalParentAccounts(accounts: Record<string, ParentAccount>)
 
 /**
  * Sync parent accounts from Firestore with deduplication & caching
+ * Pulls from both global registry and individual parent_accounts collection
  */
 let syncAccountsInFlight: Promise<Record<string, ParentAccount>> | null = null;
 let lastAccountsSyncTime = 0;
 
-export async function syncParentAccountsFromCloud(): Promise<Record<string, ParentAccount>> {
+export async function syncParentAccountsFromCloud(force: boolean = false): Promise<Record<string, ParentAccount>> {
   const local = getLocalParentAccounts();
   const now = Date.now();
-  if (now - lastAccountsSyncTime < 10000 && Object.keys(local).length > 0) {
+  if (!force && now - lastAccountsSyncTime < 5000 && Object.keys(local).length > 0) {
     return local;
   }
   if (syncAccountsInFlight) {
@@ -118,16 +251,44 @@ export async function syncParentAccountsFromCloud(): Promise<Record<string, Pare
     try {
       await ensureFirebaseAuth();
       if (db) {
-        const snap = await getDoc(doc(db, "system_state", "portal_accounts_registry"));
-        if (snap.exists()) {
-          const cloudData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
-          if (cloudData) {
-            const merged = { ...local, ...cloudData };
-            saveLocalParentAccounts(merged);
-            lastAccountsSyncTime = Date.now();
-            return merged;
+        let merged = { ...local };
+        let hasChanges = false;
+
+        // 1. Fetch system_state registry
+        try {
+          const regSnap = await getDoc(doc(db, "system_state", "portal_accounts_registry"));
+          if (regSnap.exists()) {
+            const regData = regSnap.data()?.accounts as Record<string, ParentAccount> | undefined;
+            if (regData) {
+              merged = { ...merged, ...regData };
+              hasChanges = true;
+            }
           }
+        } catch {}
+
+        // 2. Fetch parent_accounts collection (catches individual mobile activations)
+        try {
+          const colSnap = await getDocs(collection(db, "parent_accounts"));
+          colSnap.forEach((docSnap) => {
+            const accData = docSnap.data() as ParentAccount;
+            const bCode = docSnap.id || accData?.studentBarcode;
+            if (bCode && accData) {
+              if (accData.status === "deleted") {
+                delete merged[bCode];
+                hasChanges = true;
+              } else if (accData.status === "active" || accData.status === "disabled") {
+                merged[bCode] = { ...merged[bCode], ...accData };
+                hasChanges = true;
+              }
+            }
+          });
+        } catch {}
+
+        if (hasChanges) {
+          saveLocalParentAccounts(merged);
         }
+        lastAccountsSyncTime = Date.now();
+        return merged;
       }
     } catch (err) {
       console.warn("Could not fetch cloud parent accounts:", err);
@@ -140,7 +301,7 @@ export async function syncParentAccountsFromCloud(): Promise<Record<string, Pare
 }
 
 /**
- * Persist parent accounts to Firestore & LocalStorage (Instant local execution + background cloud sync)
+ * Persist parent accounts to Firestore & LocalStorage (Instant 0ms local execution + parallel background cloud sync)
  */
 export async function persistParentAccount(account: ParentAccount): Promise<void> {
   const accounts = getLocalParentAccounts();
@@ -153,11 +314,18 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
     delete account.deletedAt;
   }
 
+  account.updatedAt = nowIso;
   accounts[account.studentBarcode] = account;
   saveLocalParentAccounts(accounts);
 
-  // If status is active, broadcast activation to all tabs
+  // If status is active, broadcast activation to all local tabs immediately
   if (account.status === "active") {
+    logSupervisorAccountEvent(
+      "activate",
+      account.studentBarcode,
+      account.studentName || account.studentBarcode,
+      `تم تفعيل الحساب بنجاح - الهاتف: ${account.parentPhone || "غير محدد"}`
+    );
     accountEventsBus?.postMessage({
       type: "ACCOUNT_ACTIVATED",
       barcode: account.studentBarcode,
@@ -177,6 +345,14 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
 
   // If status is disabled or deleted, immediately broadcast revocation to log out parent device
   if (account.status === "disabled" || account.status === "deleted") {
+    logSupervisorAccountEvent(
+      account.status === "disabled" ? "disable" : "delete",
+      account.studentBarcode,
+      account.studentName || account.studentBarcode,
+      account.status === "disabled"
+        ? "تم تعطيل الحساب مؤقتاً وتسجيل خروج الهاتف تلقائياً"
+        : "تم حذف الحساب نهائياً وفصل جلسة الهاتف"
+    );
     const reasonText =
       account.status === "disabled"
         ? "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة."
@@ -200,34 +376,39 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
     }
   }
 
-  // Reliable cloud persistence tied to Firestore
-  try {
-    await ensureFirebaseAuth();
-    if (db) {
-      // 1. Save individual document
-      await setDoc(doc(db, "parent_accounts", account.studentBarcode), account, { merge: true });
-      // 2. Clear any lingering revocation record if account is activated
-      if (account.status === "active") {
-        try {
-          await deleteDoc(doc(db, "account_revocations", account.studentBarcode));
-        } catch {}
-      }
-      // 3. Save in synchronized state registry
+  // Reliable cloud persistence tied to Firestore (Executed in parallel without blocking)
+  ensureFirebaseAuth()
+    .then(async () => {
+      if (!db) return;
       const allAccs = getLocalParentAccounts();
       allAccs[account.studentBarcode] = account;
-      await setDoc(
-        doc(db, "system_state", "portal_accounts_registry"),
-        { accounts: allAccs, updatedAt: nowIso },
-        { merge: true }
-      );
-    }
-  } catch (err) {
-    console.warn("Cloud parent account save notice:", err);
-  }
+
+      const writes: Promise<any>[] = [
+        // 1. Save individual document
+        setDoc(doc(db, "parent_accounts", account.studentBarcode), account, { merge: true }),
+        // 2. Save in synchronized state registry
+        setDoc(
+          doc(db, "system_state", "portal_accounts_registry"),
+          { accounts: allAccs, updatedAt: nowIso },
+          { merge: true }
+        ),
+      ];
+
+      // 3. Clear any lingering revocation record if account is active
+      if (account.status === "active") {
+        writes.push(deleteDoc(doc(db, "account_revocations", account.studentBarcode)).catch(() => {}));
+      }
+
+      await Promise.all(writes);
+    })
+    .catch((err) => {
+      console.warn("Cloud parent account background save notice:", err);
+    });
 }
 
 /**
  * Delete / Reset parent account (forces first-time registration again and remote logout)
+ * Instant local execution + multi-channel cloud broadcast
  */
 export async function deleteParentAccount(studentBarcode: string): Promise<void> {
   const cleanBarcode = String(studentBarcode).trim();
@@ -263,34 +444,235 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
   }
 
   // 2. Multi-channel cloud revocation & deletion to guarantee remote mobile logout
-  try {
-    await ensureFirebaseAuth();
-    if (db) {
-      // First, update document status to "deleted" so active Firestore snapshot listeners trigger immediately
-      await setDoc(
-        doc(db, "parent_accounts", cleanBarcode),
-        { studentBarcode: cleanBarcode, status: "deleted", deletedAt: nowIso, reason: revokeReason },
-        { merge: true }
-      );
+  ensureFirebaseAuth()
+    .then(async () => {
+      if (!db) return;
+      await Promise.all([
+        // Update document status to deleted so active Firestore snapshot listeners trigger immediately
+        setDoc(
+          doc(db, "parent_accounts", cleanBarcode),
+          { studentBarcode: cleanBarcode, status: "deleted", deletedAt: nowIso, reason: revokeReason },
+          { merge: true }
+        ),
+        // Register in dedicated account_revocations collection so it acts as an explicit tombstone
+        setDoc(doc(db, "account_revocations", cleanBarcode), {
+          barcode: cleanBarcode,
+          revoked: true,
+          reason: revokeReason,
+          revokedAt: nowIso,
+        }),
+        // Update the cloud accounts registry
+        setDoc(
+          doc(db, "system_state", "portal_accounts_registry"),
+          { accounts, updatedAt: nowIso },
+          { merge: true }
+        ),
+      ]);
+    })
+    .catch((err) => {
+      console.warn("Cloud parent account delete notice:", err);
+    });
+}
 
-      // Second, register in dedicated account_revocations collection so it acts as an explicit tombstone
-      await setDoc(doc(db, "account_revocations", cleanBarcode), {
-        barcode: cleanBarcode,
-        revoked: true,
-        reason: revokeReason,
-        revokedAt: nowIso,
-      });
+/**
+ * Real-time listener for ALL parent accounts across all connected devices (phones & PCs)
+ * Used by AdminControlPanel so when ANY parent or supervisor activates/deletes an account,
+ * all open supervisor screens (mobile, tablet, desktop) update instantly in real time!
+ */
+export function subscribeToAllParentAccounts(
+  onUpdate: (accounts: Record<string, ParentAccount>) => void
+): () => void {
+  let isCancelled = false;
 
-      // Third, update the cloud accounts registry
-      await setDoc(
-        doc(db, "system_state", "portal_accounts_registry"),
-        { accounts, updatedAt: nowIso },
-        { merge: true }
-      );
+  // 1. Instant local load (0ms)
+  const initial = getLocalParentAccounts();
+  onUpdate(initial);
+
+  const mergeAndNotify = (incoming: Record<string, ParentAccount>) => {
+    if (isCancelled) return;
+    const current = getLocalParentAccounts();
+    let hasChanges = false;
+    const merged = { ...current };
+
+    for (const [barcode, acc] of Object.entries(incoming)) {
+      const bCode = String(barcode).trim();
+      if (!bCode) continue;
+      const existing = current[bCode];
+
+      if (acc.status === "deleted") {
+        if (existing && existing.status !== "deleted") {
+          delete merged[bCode];
+          hasChanges = true;
+        }
+      } else {
+        if (
+          !existing ||
+          existing.status !== acc.status ||
+          existing.password !== acc.password ||
+          existing.parentPhone !== acc.parentPhone ||
+          existing.updatedAt !== acc.updatedAt ||
+          existing.activatedAt !== acc.activatedAt
+        ) {
+          merged[bCode] = { ...existing, ...acc };
+          hasChanges = true;
+        }
+      }
     }
-  } catch (err) {
-    console.warn("Cloud parent account delete notice:", err);
+
+    if (hasChanges) {
+      saveLocalParentAccounts(merged);
+      onUpdate({ ...merged });
+    }
+  };
+
+  // 2. BroadcastChannel listener (Sub-millisecond on same device across tabs)
+  const handleBus = (ev: MessageEvent) => {
+    if (isCancelled) return;
+    const type = ev.data?.type;
+    if (type === "ACCOUNT_ACTIVATED" || type === "ACCOUNT_REVOKED" || type === "ACCOUNT_UPDATED") {
+      onUpdate(getLocalParentAccounts());
+    }
+  };
+  accountEventsBus?.addEventListener("message", handleBus);
+
+  // 3. Window Custom Event listeners
+  const handleCustomEvent = () => {
+    if (isCancelled) return;
+    onUpdate(getLocalParentAccounts());
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("eman_account_activated", handleCustomEvent);
+    window.addEventListener("eman_account_revoked", handleCustomEvent);
   }
+
+  // 4. Storage event (cross-tab LocalStorage modification)
+  const handleStorage = (ev: StorageEvent) => {
+    if (isCancelled) return;
+    if (ev.key === LS_PARENT_ACCOUNTS && ev.newValue) {
+      try {
+        const parsed = JSON.parse(ev.newValue);
+        onUpdate(parsed);
+      } catch {}
+    }
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", handleStorage);
+  }
+
+  // 5. Firestore Live Realtime Listeners (Phone to PC / PC to Phone)
+  let unsubCollection: (() => void) | null = null;
+  let unsubRegistry: (() => void) | null = null;
+  let unsubRevocations: (() => void) | null = null;
+
+  ensureFirebaseAuth()
+    .then(() => {
+      if (isCancelled || !db) return;
+
+      try {
+        // A. Listen to parent_accounts collection live
+        unsubCollection = onSnapshot(
+          collection(db, "parent_accounts"),
+          (snapshot) => {
+            if (isCancelled) return;
+            const incoming: Record<string, ParentAccount> = {};
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data() as ParentAccount;
+              const bCode = docSnap.id || data?.studentBarcode;
+              if (bCode && data) {
+                incoming[bCode] = data;
+              }
+            });
+            mergeAndNotify(incoming);
+          },
+          (err) => {
+            console.warn("Realtime parent_accounts listener notice:", err);
+          }
+        );
+
+        // B. Listen to system_state / portal_accounts_registry live
+        unsubRegistry = onSnapshot(
+          doc(db, "system_state", "portal_accounts_registry"),
+          (snap) => {
+            if (isCancelled) return;
+            if (snap.exists()) {
+              const regAccounts = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
+              if (regAccounts) {
+                mergeAndNotify(regAccounts);
+              }
+            }
+          },
+          (err) => {
+            console.warn("Realtime registry listener notice:", err);
+          }
+        );
+
+        // C. Listen to account_revocations collection live
+        unsubRevocations = onSnapshot(
+          collection(db, "account_revocations"),
+          (snapshot) => {
+            if (isCancelled) return;
+            const incoming: Record<string, ParentAccount> = {};
+            snapshot.forEach((docSnap) => {
+              const revData = docSnap.data();
+              const bCode = docSnap.id || revData?.barcode;
+              if (revData?.revoked && bCode) {
+                incoming[bCode] = {
+                  studentBarcode: String(bCode),
+                  linkedBarcodes: [String(bCode)],
+                  parentPhone: revData?.parentPhone || "",
+                  password: "",
+                  status: "deleted",
+                  createdAt: new Date().toISOString(),
+                  deletedAt: revData?.revokedAt || new Date().toISOString(),
+                };
+              }
+            });
+            mergeAndNotify(incoming);
+          },
+          (err) => {
+            console.warn("Realtime revocations listener notice:", err);
+          }
+        );
+      } catch (err) {
+        console.warn("Error subscribing to realtime cloud accounts:", err);
+      }
+    })
+    .catch(() => {});
+
+  // 6. Focus & Visibility refresh (e.g. phone screen wake-up)
+  const refreshOnResume = () => {
+    if (isCancelled) return;
+    syncParentAccountsFromCloud(true)
+      .then((res) => {
+        if (!isCancelled && res) {
+          onUpdate(res);
+        }
+      })
+      .catch(() => {});
+  };
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", refreshOnResume);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        refreshOnResume();
+      }
+    });
+  }
+
+  return () => {
+    isCancelled = true;
+    accountEventsBus?.removeEventListener("message", handleBus);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("eman_account_activated", handleCustomEvent);
+      window.removeEventListener("eman_account_revoked", handleCustomEvent);
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("focus", refreshOnResume);
+    }
+    if (unsubCollection) unsubCollection();
+    if (unsubRegistry) unsubRegistry();
+    if (unsubRevocations) unsubRevocations();
+  };
 }
 
 /**
@@ -602,28 +984,32 @@ export async function registerParentAccount(
     }
   }
 
-  // 3. Check if account already exists & is active (check both LocalStorage and Cloud Firestore!)
+  // 3. Check if account already exists & is active (Instant local check + fast cloud check if needed)
   const existingAccounts = getLocalParentAccounts();
   let existing = existingAccounts[student.barcode] || existingAccounts[barcodeTrimmed];
 
-  // If not found locally or not active locally, check Cloud Firestore directly
-  // (In case the supervisor activated it from another device like PC)
+  // If not found locally or not active locally, fast check Cloud Firestore with 800ms race limit
   if (!existing || existing.status !== "active") {
     try {
-      await ensureFirebaseAuth();
-      if (db) {
-        const cloudSnap = await getDoc(doc(db, "parent_accounts", student.barcode));
-        if (cloudSnap.exists()) {
-          const cloudData = cloudSnap.data() as ParentAccount;
-          if (cloudData && cloudData.status === "active") {
-            existing = cloudData;
-            existingAccounts[student.barcode] = cloudData;
-            saveLocalParentAccounts(existingAccounts);
+      await Promise.race([
+        (async () => {
+          await ensureFirebaseAuth();
+          if (db) {
+            const cloudSnap = await getDoc(doc(db, "parent_accounts", student.barcode));
+            if (cloudSnap.exists()) {
+              const cloudData = cloudSnap.data() as ParentAccount;
+              if (cloudData && cloudData.status === "active") {
+                existing = cloudData;
+                existingAccounts[student.barcode] = cloudData;
+                saveLocalParentAccounts(existingAccounts);
+              }
+            }
           }
-        }
-      }
+        })(),
+        new Promise((resolve) => setTimeout(resolve, 800)),
+      ]);
     } catch (err) {
-      console.warn("Cloud account check in register:", err);
+      console.warn("Cloud account check in register notice:", err);
     }
   }
 
@@ -638,6 +1024,8 @@ export async function registerParentAccount(
     };
   }
 
+  const nowIso = new Date().toISOString();
+
   // 4. Create new parent account with student's real data
   const newAccount: ParentAccount = {
     studentBarcode: student.barcode,
@@ -646,15 +1034,24 @@ export async function registerParentAccount(
     parentPhone: phoneTrimmed,
     password: passTrimmed,
     status: "active",
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
+    activatedAt: nowIso,
+    updatedAt: nowIso,
   };
 
   // Immediate local save (0ms)
   existingAccounts[student.barcode] = newAccount;
   saveLocalParentAccounts(existingAccounts);
 
-  // Reliable cloud persistence (tied to real Firestore)
-  await persistParentAccount(newAccount);
+  logSupervisorAccountEvent(
+    "self_register",
+    student.barcode,
+    student.name,
+    `قام ولي الأمر بتفعيل الحساب ذاتياً من هاتفه (هاتف: ${phoneTrimmed})`
+  );
+
+  // Reliable parallel cloud persistence (non-blocking for 0ms UI response)
+  persistParentAccount(newAccount).catch(() => {});
 
   return {
     success: true,
@@ -665,6 +1062,7 @@ export async function registerParentAccount(
 
 /**
  * Direct activation of a student's parent account by Admin
+ * Ultra-fast 0ms local response + parallel background cloud sync
  */
 export async function activateParentAccountDirectly(
   studentBarcode: string,
@@ -696,29 +1094,36 @@ export async function activateParentAccountDirectly(
     updatedAt: nowIso,
   };
 
+  // 1. Immediate local save (0ms)
   accounts[cleanBarcode] = newAccount;
   saveLocalParentAccounts(accounts);
-  await persistParentAccount(newAccount);
 
-  // Clear any old revocation record in cloud
-  try {
-    await ensureFirebaseAuth();
-    if (db) {
-      await deleteDoc(doc(db, "account_revocations", cleanBarcode));
-    }
-  } catch {}
-
+  // 2. Broadcast immediately to same-device tabs (0ms)
   accountEventsBus?.postMessage({
     type: "ACCOUNT_ACTIVATED",
     barcode: cleanBarcode,
     activatedAt: nowIso,
   });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("eman_account_activated", {
+        detail: {
+          barcode: cleanBarcode,
+          activatedAt: nowIso,
+        },
+      })
+    );
+  }
+
+  // 3. Parallel non-blocking cloud persistence
+  persistParentAccount(newAccount).catch(() => {});
 
   return newAccount;
 }
 
 /**
  * Batch activate all unactivated students with default credentials
+ * Instant 0ms local update + parallel chunked cloud save
  */
 export async function batchActivateParentAccounts(
   items: { studentBarcode: string; phone: string }[],
@@ -751,30 +1156,58 @@ export async function batchActivateParentAccounts(
       count++;
     }
   }
+
+  // 1. Immediate local save (0ms)
   saveLocalParentAccounts(accounts);
-  try {
-    await ensureFirebaseAuth();
-    if (db) {
-      for (const acc of activatedList) {
-        await setDoc(doc(db, "parent_accounts", acc.studentBarcode), acc, { merge: true });
-        try {
-          await deleteDoc(doc(db, "account_revocations", acc.studentBarcode));
-        } catch {}
-        accountEventsBus?.postMessage({
-          type: "ACCOUNT_ACTIVATED",
-          barcode: acc.studentBarcode,
-          activatedAt: nowIso,
-        });
-      }
-      await setDoc(
-        doc(db, "system_state", "portal_accounts_registry"),
-        { accounts, updatedAt: nowIso },
-        { merge: true }
-      );
-    }
-  } catch (err) {
-    console.warn("Batch activate cloud save warning:", err);
+
+  logSupervisorAccountEvent(
+    "batch_activate",
+    "الكل",
+    "تفعيل مجمع",
+    `تم تفعيل عدد ${count} حساب طالب دفعة واحدة بالكلمة الموحدة`
+  );
+
+  // 2. Broadcast local activation events immediately
+  for (const acc of activatedList) {
+    accountEventsBus?.postMessage({
+      type: "ACCOUNT_ACTIVATED",
+      barcode: acc.studentBarcode,
+      activatedAt: nowIso,
+    });
   }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("eman_account_activated", {
+        detail: { count, activatedAt: nowIso },
+      })
+    );
+  }
+
+  // 3. Parallel non-blocking cloud persistence
+  ensureFirebaseAuth()
+    .then(async () => {
+      if (!db) return;
+      const writes: Promise<any>[] = [];
+
+      for (const acc of activatedList) {
+        writes.push(setDoc(doc(db, "parent_accounts", acc.studentBarcode), acc, { merge: true }));
+        writes.push(deleteDoc(doc(db, "account_revocations", acc.studentBarcode)).catch(() => {}));
+      }
+
+      writes.push(
+        setDoc(
+          doc(db, "system_state", "portal_accounts_registry"),
+          { accounts, updatedAt: nowIso },
+          { merge: true }
+        )
+      );
+
+      await Promise.all(writes);
+    })
+    .catch((err) => {
+      console.warn("Batch activate cloud background save warning:", err);
+    });
+
   return count;
 }
 
@@ -1155,12 +1588,15 @@ export function subscribeToThreadChat(
   chatId: string,
   onUpdate: (messages: ParentChatMessage[]) => void
 ): () => void {
+  let isCancelled = false;
+
   // 1. Initial local load
   const allChats = getLocalChatMessages();
   onUpdate(allChats[chatId] || []);
 
   // 2. BroadcastChannel local listener
   const handleBusMessage = (ev: MessageEvent) => {
+    if (isCancelled) return;
     if (ev.data?.type === "new_message" && ev.data.message.chatId === chatId) {
       const chats = getLocalChatMessages();
       onUpdate(chats[chatId] || []);
@@ -1176,23 +1612,32 @@ export function subscribeToThreadChat(
 
   // 3. Firestore snapshot listener
   let unsubFirestore: (() => void) | null = null;
-  if (db) {
-    unsubFirestore = onSnapshot(doc(db, "parent_chats", chatId), (snap) => {
-      if (snap.exists()) {
-        const cloudMessages = snap.data()?.messages as ParentChatMessage[] | undefined;
-        if (cloudMessages && Array.isArray(cloudMessages)) {
-          const chats = getLocalChatMessages();
-          chats[chatId] = cloudMessages;
-          saveLocalChatMessages(chats);
-          onUpdate(cloudMessages);
+  ensureFirebaseAuth()
+    .then(() => {
+      if (isCancelled || !db) return;
+      unsubFirestore = onSnapshot(
+        doc(db, "parent_chats", chatId),
+        (snap) => {
+          if (isCancelled) return;
+          if (snap.exists()) {
+            const cloudMessages = snap.data()?.messages as ParentChatMessage[] | undefined;
+            if (cloudMessages && Array.isArray(cloudMessages)) {
+              const chats = getLocalChatMessages();
+              chats[chatId] = cloudMessages;
+              saveLocalChatMessages(chats);
+              onUpdate(cloudMessages);
+            }
+          }
+        },
+        (err) => {
+          console.warn("Firestore chat subscription error:", err);
         }
-      }
-    }, (err) => {
-      console.warn("Firestore chat subscription error:", err);
-    });
-  }
+      );
+    })
+    .catch(() => {});
 
   return () => {
+    isCancelled = true;
     if (chatBus) {
       chatBus.removeEventListener("message", handleBusMessage);
     }
@@ -1209,11 +1654,14 @@ export function subscribeToThreadChat(
 export function subscribeToAllChats(
   onUpdate: (chats: Record<string, ParentChatMessage[]>) => void
 ): () => void {
+  let isCancelled = false;
+
   // 1. Initial local load
   onUpdate(getLocalChatMessages());
 
   // 2. BroadcastChannel local listener
   const handleBusMessage = (ev: MessageEvent) => {
+    if (isCancelled) return;
     if (ev.data?.type === "new_message" || ev.data?.type === "messages_read") {
       onUpdate(getLocalChatMessages());
     }
@@ -1225,6 +1673,7 @@ export function subscribeToAllChats(
 
   // 3. LocalStorage storage event listener
   const handleStorage = (ev: StorageEvent) => {
+    if (isCancelled) return;
     if (ev.key === LS_PORTAL_CHATS) {
       onUpdate(getLocalChatMessages());
     }
@@ -1235,29 +1684,38 @@ export function subscribeToAllChats(
 
   // 4. Firestore collection snapshot listener
   let unsubFirestore: (() => void) | null = null;
-  if (db) {
-    unsubFirestore = onSnapshot(collection(db, "parent_chats"), (snapshot) => {
-      const chats = getLocalChatMessages();
-      let hasChanges = false;
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        const chatId = docSnap.id;
-        const cloudMessages = data?.messages as ParentChatMessage[] | undefined;
-        if (cloudMessages && Array.isArray(cloudMessages)) {
-          chats[chatId] = cloudMessages;
-          hasChanges = true;
+  ensureFirebaseAuth()
+    .then(() => {
+      if (isCancelled || !db) return;
+      unsubFirestore = onSnapshot(
+        collection(db, "parent_chats"),
+        (snapshot) => {
+          if (isCancelled) return;
+          const chats = getLocalChatMessages();
+          let hasChanges = false;
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            const chatId = docSnap.id;
+            const cloudMessages = data?.messages as ParentChatMessage[] | undefined;
+            if (cloudMessages && Array.isArray(cloudMessages)) {
+              chats[chatId] = cloudMessages;
+              hasChanges = true;
+            }
+          });
+          if (hasChanges) {
+            saveLocalChatMessages(chats);
+            onUpdate({ ...chats });
+          }
+        },
+        (err) => {
+          console.warn("Firestore all-chats subscription error:", err);
         }
-      });
-      if (hasChanges) {
-        saveLocalChatMessages(chats);
-        onUpdate({ ...chats });
-      }
-    }, (err) => {
-      console.warn("Firestore all-chats subscription error:", err);
-    });
-  }
+      );
+    })
+    .catch(() => {});
 
   return () => {
+    isCancelled = true;
     if (chatBus) {
       chatBus.removeEventListener("message", handleBusMessage);
     }

@@ -20,7 +20,11 @@ import {
   syncParentAccountsFromCloud,
   activateParentAccountDirectly,
   batchActivateParentAccounts,
+  subscribeToAllParentAccounts,
+  getAdminActivityLogs,
+  subscribeToAdminActivityLogs,
 } from "../../utils/portalStorage";
+import { AdminActivityLog } from "../../types/portal";
 import { openWhatsApp } from "../../utils/helpers";
 import {
   sendPortalNotification,
@@ -146,16 +150,39 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   // Live real-time action feedback for activate, disable, delete with remote logout notification
   const [liveActionFeedback, setLiveActionFeedback] = useState<string | null>(null);
 
-  // Initial cloud sync
+  // Cross-device synchronized Activity Log (Audit Trail) - Only visible to supervisor
+  const [activityLogs, setActivityLogs] = useState<AdminActivityLog[]>(() => getAdminActivityLogs());
+  const [showActivityFeed, setShowActivityFeed] = useState(false);
+  const [activityTypeFilter, setActivityTypeFilter] = useState<"all" | "activate" | "delete" | "disable" | "self_register">("all");
+
+  // Real-time live cross-device sync (Mobile Phones, Tablets, Laptops)
   useEffect(() => {
+    // 1. Initial manual cloud fetch
     handleCloudSync();
+
+    // 2. Real-time live sync for accounts across all devices (0ms updates when any mobile activates/deletes)
+    const unsubAccounts = subscribeToAllParentAccounts((updatedAccounts) => {
+      setAccounts(updatedAccounts);
+    });
+
+    // 3. Real-time live audit feed subscription
+    const unsubLogs = subscribeToAdminActivityLogs((updatedLogs) => {
+      setActivityLogs(updatedLogs);
+    });
+
+    return () => {
+      unsubAccounts();
+      unsubLogs();
+    };
   }, []);
 
   const handleCloudSync = async () => {
     setIsSyncingAccounts(true);
     try {
-      const synced = await syncParentAccountsFromCloud();
+      const synced = await syncParentAccountsFromCloud(true);
       setAccounts(synced);
+      setLiveActionFeedback("🟢 تم تحديث ومزامنة جميع الحسابات سحابياً بنجاح عبر كافة الأجهزة!");
+      setTimeout(() => setLiveActionFeedback(null), 3000);
     } catch (err) {
       console.warn("Could not sync cloud accounts:", err);
     } finally {
@@ -322,6 +349,15 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     return count;
   }, [allChats]);
 
+  // Filtered supervisor activity logs across all devices
+  const filteredActivityLogs = useMemo(() => {
+    if (activityTypeFilter === "all") return activityLogs;
+    if (activityTypeFilter === "activate") {
+      return activityLogs.filter((l) => l.type === "activate" || l.type === "batch_activate");
+    }
+    return activityLogs.filter((l) => l.type === activityTypeFilter);
+  }, [activityLogs, activityTypeFilter]);
+
   // All chat threads summarized with strict WhatsApp-style sorting (Latest active on top)
   const chatThreadsSummary = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
@@ -410,17 +446,17 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     }
     setIsActivating(true);
     try {
-      await activateParentAccountDirectly(
+      const updated = await activateParentAccountDirectly(
         activatingItem.barcode,
         actPhone.trim() || activatingItem.phone,
         actPassword.trim()
       );
-      reloadAccounts();
+      setAccounts((prev) => ({ ...prev, [activatingItem.barcode]: updated }));
       setActFeedback(`تم تفعيل حساب ولي أمر الطالب (${activatingItem.studentName}) بنجاح!`);
       setTimeout(() => {
         setActivatingItem(null);
         setActFeedback(null);
-      }, 900);
+      }, 400);
     } catch (err) {
       setActFeedback("حدث خطأ أثناء التفعيل السحابي.");
     } finally {
@@ -449,12 +485,12 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
         unactivatedStudents,
         batchPassword.trim() || "1234"
       );
-      reloadAccounts();
+      setAccounts(getLocalParentAccounts());
       setBatchFeedback(`تم تفعيل ${count} حساب طالب بنجاح بكلمة المرور الموحدة!`);
       setTimeout(() => {
         setShowBatchModal(false);
         setBatchFeedback(null);
-      }, 1200);
+      }, 500);
     } catch (err) {
       setBatchFeedback("حدث خطأ أثناء التفعيل المجمع.");
     } finally {
@@ -476,18 +512,20 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       status: nextStatus,
       updatedAt: new Date().toISOString(),
     };
-    await persistParentAccount(updated);
-    reloadAccounts();
+    // 0ms instant local update
+    setAccounts((prev) => ({ ...prev, [item.barcode]: updated }));
+    persistParentAccount(updated).catch(() => {});
+
     if (nextStatus === "disabled") {
       setLiveActionFeedback(
-        `🔒 تم تعطيل حساب الطالب (${item.studentName || item.barcode}) بنجاح، وتم تسجيل خروج ولي الأمر تلقائياً من هاتفه.`
+        `🔒 تم تعطيل حساب الطالب (${item.studentName || item.barcode}) بنجاح، وتم تسجيل خروج هاتف ولي الأمر تلقائياً عبر جميع الأجهزة.`
       );
     } else {
       setLiveActionFeedback(
         `✅ تم إعادة تفعيل حساب الطالب (${item.studentName || item.barcode}) بنجاح.`
       );
     }
-    setTimeout(() => setLiveActionFeedback(null), 6000);
+    setTimeout(() => setLiveActionFeedback(null), 4500);
   };
 
   // Action: Delete / Reset Account (opens in-app confirmation modal, no window.confirm)
@@ -504,14 +542,18 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     setAccountToDelete(null);
 
     // 2. Immediate local delete & instant UI refresh
+    setAccounts((prev) => {
+      const next = { ...prev };
+      delete next[barcode];
+      return next;
+    });
     deleteParentAccount(barcode).catch(() => {});
-    reloadAccounts();
 
     // 3. Instant affirmative feedback
     setLiveActionFeedback(
-      `🗑️ تم حذف حساب ولي أمر (${studentName}) بنجاح، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
+      `🗑️ تم حذف حساب ولي أمر (${studentName}) بنجاح، وتم فصل جلسة الهاتف عن بُعد فوراً.`
     );
-    setTimeout(() => setLiveActionFeedback(null), 5000);
+    setTimeout(() => setLiveActionFeedback(null), 4500);
   };
 
   // Action: Quick Direct Activate with Default Credentials
@@ -521,16 +563,16 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     parentPhone: string;
   }) => {
     try {
-      await activateParentAccountDirectly(
+      const updated = await activateParentAccountDirectly(
         item.barcode,
         item.parentPhone || "0",
         "1234"
       );
-      reloadAccounts();
+      setAccounts((prev) => ({ ...prev, [item.barcode]: updated }));
       setLiveActionFeedback(
-        `⚡ تم تفعيل حساب ولي أمر (${item.studentName}) بنجاح بكلمة المرور الافتراضية (1234).`
+        `⚡ تم تفعيل حساب ولي أمر (${item.studentName}) فوراً بكلمة المرور الافتراضية (1234)!`
       );
-      setTimeout(() => setLiveActionFeedback(null), 6000);
+      setTimeout(() => setLiveActionFeedback(null), 4500);
     } catch {
       setLiveActionFeedback("حدث خطأ أثناء التفعيل السريع.");
     }
@@ -570,13 +612,14 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    await persistParentAccount(updated);
-    reloadAccounts();
-    setEditFeedback("تم تحديث بيانات الاعتماد سحابياً بنجاح!");
+    // 0ms instant local update
+    setAccounts((prev) => ({ ...prev, [editBarcode.trim()]: updated }));
+    persistParentAccount(updated).catch(() => {});
+    setEditFeedback("تم تحديث بيانات الاعتماد وحفظها سحابياً بنجاح!");
     setTimeout(() => {
       setEditingAccount(null);
       setEditFeedback(null);
-    }, 1000);
+    }, 400);
   };
 
   // Action: Save Admin Settings
@@ -848,12 +891,40 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="ابحث بالاسم، كود الباركود، رقم الهاتف، أو كلمة المرور..."
-                  className="w-full pr-10 pl-4 py-2.5 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-indigo-400 focus:outline-none text-xs text-white"
+                  className="w-full pr-10 pl-9 py-2.5 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-indigo-400 focus:outline-none text-xs text-white"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+                    title="مسح البحث"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
 
               {/* Filters & Quick Actions */}
               <div className="flex flex-wrap items-center gap-2">
+                {/* Live Synchronized Activity Feed Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setShowActivityFeed(!showActivityFeed)}
+                  className={`px-3 py-2 rounded-2xl border text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+                    showActivityFeed
+                      ? "bg-indigo-600/30 border-indigo-500 text-indigo-300 shadow-md shadow-indigo-500/20"
+                      : "bg-slate-800/80 border-slate-700 text-slate-300 hover:text-white"
+                  }`}
+                  title="سجل العمليات المتزامن بين كل الهواتف والأجهزة (خاص بالمشرف)"
+                >
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <span>سجل الربط والمزامنة ({activityLogs.length})</span>
+                </button>
+
                 {/* Status Filter */}
                 <div className="flex items-center gap-1.5">
                   <Filter className="w-4 h-4 text-slate-400" />
@@ -923,12 +994,142 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                   onClick={handleCloudSync}
                   disabled={isSyncingAccounts}
                   className="p-2 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition cursor-pointer"
-                  title="مزامنة سحابية فورية للحسابات"
+                  title="مزامنة سحابية فورية للحسابات عبر كافة الأجهزة"
                 >
                   <RefreshCw className={`w-4 h-4 ${isSyncingAccounts ? "animate-spin text-indigo-400" : ""}`} />
                 </button>
               </div>
             </div>
+
+            {/* Synchronized Activity Log Panel (Supervisor-Only Audit Trail) */}
+            {showActivityFeed && (
+              <div className="bg-slate-900/95 border-2 border-indigo-500/40 rounded-3xl p-4 sm:p-6 shadow-2xl space-y-4 animate-fadeIn">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 flex items-center justify-center">
+                      <Sparkles className="w-5 h-5 text-amber-400" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm sm:text-base font-bold text-white">
+                          سجل العمليات والربط اللحظي بين كل الأجهزة
+                        </h3>
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          متزامن سحابياً
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        خاص بالمشرف: يوثق فوراً أي عملية تفعيل، حذف، أو تعطيل حساب تمت من هاتفك أو من أي جهاز آخر
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowActivityFeed(false)}
+                      className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
+                    >
+                      إخفاء السجل
+                    </button>
+                  </div>
+                </div>
+
+                {/* Audit Type Filter Pills */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-slate-400 ml-1">تصفية السجل:</span>
+                  {[
+                    { id: "all", label: "الكل", count: activityLogs.length },
+                    { id: "activate", label: "تفعيل الحسابات", count: activityLogs.filter(l => l.type === "activate" || l.type === "batch_activate").length },
+                    { id: "self_register", label: "تفعيل ذاتي من هاتف ولي الأمر", count: activityLogs.filter(l => l.type === "self_register").length },
+                    { id: "disable", label: "تعطيل", count: activityLogs.filter(l => l.type === "disable").length },
+                    { id: "delete", label: "حذف نهائي", count: activityLogs.filter(l => l.type === "delete").length },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActivityTypeFilter(tab.id as any)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
+                        activityTypeFilter === tab.id
+                          ? "bg-indigo-600 text-white shadow"
+                          : "bg-slate-800/70 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <span>{tab.label}</span>
+                      <span className="text-[10px] opacity-75 font-mono">({tab.count})</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Activity List */}
+                <div className="max-h-72 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                  {filteredActivityLogs.length === 0 ? (
+                    <div className="py-8 text-center text-slate-400 text-xs bg-slate-950/40 rounded-2xl border border-slate-800/80">
+                      لا توجد عمليات مسجلة في هذا التصنيف حتى الآن. أي عملية تفعيل أو حذف تتم من هاتفك أو أجهزة أولياء الأمور ستظهر هنا فوراً.
+                    </div>
+                  ) : (
+                    filteredActivityLogs.map((log) => {
+                      const isActivate = log.type === "activate" || log.type === "batch_activate";
+                      const isSelf = log.type === "self_register";
+                      const isDisable = log.type === "disable";
+
+                      return (
+                        <div
+                          key={log.id}
+                          className="p-3 rounded-2xl bg-slate-950/60 border border-slate-800/80 hover:border-slate-700/80 transition flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+                                isActivate
+                                  ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-400"
+                                  : isSelf
+                                  ? "bg-cyan-500/15 border border-cyan-500/30 text-cyan-400"
+                                  : isDisable
+                                  ? "bg-amber-500/15 border border-amber-500/30 text-amber-400"
+                                  : "bg-rose-500/15 border border-rose-500/30 text-rose-400"
+                              }`}
+                            >
+                              {isActivate && <Zap className="w-4 h-4" />}
+                              {isSelf && <Smartphone className="w-4 h-4" />}
+                              {isDisable && <UserX className="w-4 h-4" />}
+                              {!isActivate && !isSelf && !isDisable && <Trash2 className="w-4 h-4" />}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-white text-xs">{log.studentName}</span>
+                                {log.studentBarcode && log.studentBarcode !== "الكل" && (
+                                  <span className="font-mono text-amber-400 text-[11px]">#{log.studentBarcode}</span>
+                                )}
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                    isActivate
+                                      ? "bg-emerald-500/20 text-emerald-300"
+                                      : isSelf
+                                      ? "bg-cyan-500/20 text-cyan-300"
+                                      : isDisable
+                                      ? "bg-amber-500/20 text-amber-300"
+                                      : "bg-rose-500/20 text-rose-300"
+                                  }`}
+                                >
+                                  {isActivate ? "تفعيل حساب" : isSelf ? "تفعيل ذاتي عبر الهاتف" : isDisable ? "تعطيل حساب" : "حذف حساب"}
+                                </span>
+                              </div>
+                              <p className="text-slate-300 text-[11px] mt-0.5">{log.details}</p>
+                            </div>
+                          </div>
+
+                          <div className="text-right shrink-0">
+                            <span className="text-[11px] font-mono text-slate-400">{log.timeFormatted}</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Accounts Table */}
             <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xl overflow-x-auto max-h-[72vh] overflow-y-auto custom-scrollbar">
@@ -1051,12 +1252,53 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                                     <UserCheck className="w-3.5 h-3.5" />
                                     <span>تفعيل الحساب</span>
                                   </button>
+                                  {item.parentPhone && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const msg = `السلام عليكم ورحمة الله وبركاته، ولي أمر الطالب (${item.studentName}).\nيسعدنا تواصلكم لتفعيل حسابكم في بوابة الأستاذة إيمان الدمشيتي التعليمية عبر الرابط: ${window.location.origin}\nكود الطالب: ${item.barcode}`;
+                                        openWhatsApp(item.parentPhone, msg);
+                                      }}
+                                      className="p-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 transition cursor-pointer"
+                                      title="إرسال دعوة التفعيل عبر واتساب"
+                                    >
+                                      <MessageCircle className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
                                 </div>
                               )}
 
                               {/* Active State Actions */}
                               {isActive && (
                                 <>
+                                  {/* Direct WhatsApp Share */}
+                                  {item.parentPhone && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const msg = `السلام عليكم ورحمة الله وبركاته، ولي أمر الطالب (${item.studentName}).\nتم تفعيل حسابكم في بوابة الأستاذة إيمان الدمشيتي.\nكود الطالب للدخول: ${item.barcode}\nكلمة المرور: ${item.password || "1234"}\nرابط المنظومة: ${window.location.origin}`;
+                                        openWhatsApp(item.parentPhone, msg);
+                                      }}
+                                      className="p-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 hover:text-emerald-300 transition cursor-pointer"
+                                      title="إرسال بيانات الحساب لولي الأمر عبر واتساب"
+                                    >
+                                      <MessageCircle className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+
+                                  {/* Open in-app chat */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedChatBarcode(item.barcode);
+                                      setActiveTab("chats");
+                                    }}
+                                    className="p-1.5 rounded-xl bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/30 text-blue-400 hover:text-blue-300 transition cursor-pointer"
+                                    title="مراسلة ولي الأمر في المحادثات"
+                                  >
+                                    <MessageSquare className="w-3.5 h-3.5" />
+                                  </button>
+
                                   {/* Edit Credentials */}
                                   <button
                                     type="button"

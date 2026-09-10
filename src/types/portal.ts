@@ -33,6 +33,16 @@ export interface AdminPortalSettings {
   updatedAt?: string;
 }
 
+export interface AdminActivityLog {
+  id: string;
+  type: "activate" | "disable" | "enable" | "delete" | "edit" | "batch_activate" | "self_register";
+  studentBarcode: string;
+  studentName: string;
+  timestamp: number;
+  timeFormatted: string;
+  details: string;
+}
+
 export type PortalUserRole = "parent" | "admin" | null;
 
 export interface PortalSession {
