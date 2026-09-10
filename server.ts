@@ -55,6 +55,13 @@ import {
   registerPortalSSEClient,
   unregisterPortalSSEClient,
   broadcastPortalSSE,
+  registerOrUpdateDeviceState,
+  getDeviceState,
+  getAllDeviceStates,
+  recordDeviceSpecificScan,
+  getDeviceIsolatedLiveData,
+  registerDeviceSSEClient,
+  broadcastDeviceSSE,
 } from "./server/portalStore";
 
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
@@ -393,40 +400,260 @@ app.post("/api/portal/live-scan", async (req, res) => {
   }
 });
 
-// Ultra-fast Student Portal Data (serves parents in <5ms from memory)
+// Zero-Cache anti-stale header applicator for live device & portal APIs
+function applyZeroCacheHeaders(res: express.Response) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
+
+// Ultra-fast Student Portal Data (serves parents in <5ms from memory, zero-cache)
 app.get("/api/portal/student-data", (req, res) => {
-  const barcode = req.query.barcode ? String(req.query.barcode).trim() : "";
-  if (!barcode) {
-    return res.status(400).json({ success: false, message: "كود الطالب أو رقم الهاتف مطلوب" });
+  try {
+    const barcode = req.query.barcode ? String(req.query.barcode).trim() : "";
+    if (!barcode) {
+      return res.status(400).json({ success: false, message: "كود الطالب أو رقم الهاتف مطلوب" });
+    }
+    const data = getStudentPortalData(barcode);
+    applyZeroCacheHeaders(res);
+    return res.json(data);
+  } catch (err: any) {
+    console.error("[StudentData] Error:", err);
+    return res.status(500).json({ success: false, error: err.message || "Failed to retrieve student data" });
   }
-  const data = getStudentPortalData(barcode);
-  res.setHeader("Cache-Control", "private, no-cache, no-transform");
-  return res.json(data);
 });
 
-// Full System Sync with HTTP ETag (304 Not Modified when nothing changed, saving bandwidth)
+// Full System Sync with HTTP ETag (Bypasses ETag if deviceId/noCache is passed for real-time freshness)
 app.get("/api/portal/system-sync", (req, res) => {
-  const etag = getSystemETag();
-  if (req.headers["if-none-match"] === etag) {
-    return res.status(304).end();
+  try {
+    const deviceId =
+      (req.headers["x-device-id"] as string) ||
+      (req.headers["x-machine-id"] as string) ||
+      (req.query.deviceId as string) ||
+      (req.query.machineId as string) ||
+      "";
+
+    const isNoCacheRequested =
+      req.query.noCache === "true" ||
+      req.query._t !== undefined ||
+      !!deviceId ||
+      req.headers["cache-control"]?.includes("no-cache");
+
+    if (isNoCacheRequested) {
+      applyZeroCacheHeaders(res);
+      // Track device last seen if deviceId is provided
+      if (deviceId) {
+        registerOrUpdateDeviceState(deviceId, {}, req.ip);
+      }
+      return res.json({
+        ...getSystemCache(),
+        _deviceId: deviceId || undefined,
+        _freshAt: Date.now(),
+      });
+    }
+
+    const etag = getSystemETag();
+    if (req.headers["if-none-match"] === etag) {
+      return res.status(304).end();
+    }
+    res.setHeader("ETag", etag);
+    res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=10");
+    return res.json(getSystemCache());
+  } catch (err: any) {
+    console.error("[SystemSync] Error:", err);
+    return res.status(500).json({ error: err.message || "Sync failed" });
   }
-  res.setHeader("ETag", etag);
-  res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=10");
-  return res.json(getSystemCache());
 });
 
 // Teacher System State Mutation: updates in-memory cache and persists to disk
 app.post("/api/portal/system-sync", (req, res) => {
   try {
     updateSystemDataPartial(req.body);
+    const deviceId =
+      (req.headers["x-device-id"] as string) ||
+      (req.headers["x-machine-id"] as string) ||
+      req.body.deviceId;
+    if (deviceId) {
+      registerOrUpdateDeviceState(deviceId, {}, req.ip);
+    }
     return res.json({ success: true, timestamp: Date.now() });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
 });
 
+// ----------------------------------------------------
+// DEDICATED MULTI-DEVICE / MACHINE-SPECIFIC LIVE API
+// Guarantees independent per-device data isolation with zero cache
+// ----------------------------------------------------
+
+// 1. Get Live Data for a Specific Device / Machine
+// Supports: Route param :deviceId, Header x-device-id / x-machine-id, or Query param ?deviceId=
+app.get(["/api/device/live-data", "/api/devices/:deviceId/live-data"], (req, res) => {
+  try {
+    applyZeroCacheHeaders(res);
+
+    const deviceId =
+      req.params.deviceId ||
+      (req.headers["x-device-id"] as string) ||
+      (req.headers["x-machine-id"] as string) ||
+      (req.query.deviceId as string) ||
+      (req.query.machineId as string) ||
+      "default_machine";
+
+    const filterGrade = req.query.grade ? String(req.query.grade).trim() : undefined;
+    const filterDays = req.query.days ? String(req.query.days).trim() : undefined;
+    const limitScans = req.query.limit ? Math.min(Number(req.query.limit) || 50, 100) : 50;
+    const includeStudents = req.query.includeStudents === "true";
+
+    const liveResult = getDeviceIsolatedLiveData(deviceId, {
+      filterGrade,
+      filterDays,
+      limitScans,
+      includeStudents,
+    });
+
+    return res.json(liveResult);
+  } catch (err: any) {
+    console.error("[DeviceLiveData] Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to fetch device live data",
+      retryAfterMs: 3000,
+    });
+  }
+});
+
+// 2. Device Heartbeat & Configuration
+app.post("/api/device/heartbeat", (req, res) => {
+  try {
+    applyZeroCacheHeaders(res);
+
+    const deviceId =
+      (req.headers["x-device-id"] as string) ||
+      (req.headers["x-machine-id"] as string) ||
+      req.body.deviceId ||
+      req.body.machineId ||
+      "default_machine";
+
+    const updatedDevice = registerOrUpdateDeviceState(
+      deviceId,
+      {
+        machineId: req.body.machineId || deviceId,
+        deviceName: req.body.deviceName,
+        role: req.body.role,
+        activeGrade: req.body.activeGrade,
+        activeDays: req.body.activeDays,
+        activeSlotId: req.body.activeSlotId,
+        customSettings: req.body.customSettings,
+      },
+      req.ip
+    );
+
+    return res.json({
+      success: true,
+      device: updatedDevice,
+      systemTime: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error("[DeviceHeartbeat] Error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Record Device-Specific Scan
+app.post("/api/device/scan", (req, res) => {
+  try {
+    applyZeroCacheHeaders(res);
+
+    const deviceId =
+      (req.headers["x-device-id"] as string) ||
+      (req.headers["x-machine-id"] as string) ||
+      req.body.deviceId ||
+      req.body.machineId ||
+      "default_machine";
+
+    const { barcode, status, studentName, grade, days, timeIso, timeDisplay } = req.body;
+    if (!barcode || !status) {
+      return res.status(400).json({ success: false, message: "كود الطالب والحالة مطلوبان" });
+    }
+
+    // 1. Record device-isolated scan
+    const devScan = recordDeviceSpecificScan(deviceId, {
+      barcode: String(barcode).trim(),
+      status: status as any,
+      studentName,
+      grade,
+      days,
+      timeIso,
+      timeDisplay,
+    });
+
+    // 2. Also register in the central attendance store
+    const globalResult = recordLiveScan({
+      barcode: String(barcode).trim(),
+      status: status as any,
+      timeIso,
+      timeDisplay,
+      studentName,
+      grade,
+      days,
+      scannedBy: `جهاز (${deviceId.slice(-6)})`,
+    });
+
+    return res.json({
+      success: true,
+      deviceScan: devScan,
+      student: globalResult.student,
+    });
+  } catch (err: any) {
+    console.error("[DeviceScan] Error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. List All Active Devices & Machines in the System
+app.get("/api/devices", (req, res) => {
+  try {
+    applyZeroCacheHeaders(res);
+    const devices = getAllDeviceStates();
+    return res.json({
+      success: true,
+      count: devices.length,
+      devices,
+      timestamp: Date.now(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Dedicated Device Server-Sent Events (SSE) Stream
+// Guarantees real-time streaming directly to the connected device without cross-device noise
+app.get("/api/device/stream", (req, res) => {
+  const deviceId =
+    (req.headers["x-device-id"] as string) ||
+    (req.headers["x-machine-id"] as string) ||
+    (req.query.deviceId as string) ||
+    (req.query.machineId as string) ||
+    "default_machine";
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const unregister = registerDeviceSSEClient(deviceId, res);
+
+  req.on("close", () => {
+    unregister();
+  });
+});
+
 // Parent Accounts Sync & Save
 app.get("/api/portal/accounts-sync", (_req, res) => {
+  applyZeroCacheHeaders(res);
   return res.json({ success: true, accounts: getAllParentAccounts() });
 });
 

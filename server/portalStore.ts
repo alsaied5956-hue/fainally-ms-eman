@@ -508,5 +508,374 @@ export function saveParentAccountRecord(account: ParentAccountRecord): ParentAcc
   return updated;
 }
 
+// ----------------------------------------------------
+// MULTI-DEVICE / MACHINE-SPECIFIC ISOLATED STATE STORE
+// Zero-cross-talk state management per Device ID / Machine ID
+// ----------------------------------------------------
+
+export interface DeviceScanRecord {
+  id: string;
+  barcode: string;
+  studentName?: string;
+  grade?: string;
+  days?: string;
+  status: "حضور" | "تأخير" | "غائب";
+  timeIso: string;
+  timeDisplay: string;
+  timestamp: number;
+}
+
+export interface DeviceStateRecord {
+  deviceId: string;
+  machineId: string;
+  deviceName: string;
+  role: "scanner" | "display" | "supervisor" | "portal" | "kiosk";
+  activeGrade?: string;
+  activeDays?: string;
+  activeSlotId?: string;
+  lastSeen: number;
+  lastIp?: string;
+  status: "online" | "idle" | "offline";
+  recentScans: DeviceScanRecord[];
+  customSettings: Record<string, any>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const deviceStatesCache = new Map<string, DeviceStateRecord>();
+const DEVICE_STORE_PATH = path.join(process.cwd(), ".device_states_store.json");
+
+// Load devices from disk if existing
+try {
+  if (fs.existsSync(DEVICE_STORE_PATH)) {
+    const raw = fs.readFileSync(DEVICE_STORE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      Object.entries(parsed).forEach(([devId, rec]: [string, any]) => {
+        if (rec && typeof rec === "object") {
+          deviceStatesCache.set(devId, {
+            ...rec,
+            deviceId: devId,
+            machineId: rec.machineId || devId,
+            recentScans: Array.isArray(rec.recentScans) ? rec.recentScans : [],
+            customSettings: rec.customSettings || {},
+          });
+        }
+      });
+      console.log(`[PortalStore] Loaded ${deviceStatesCache.size} device state profiles.`);
+    }
+  }
+} catch (err) {
+  console.warn("[PortalStore] Warning loading .device_states_store.json:", err);
+}
+
+let saveDevicesTimeout: NodeJS.Timeout | null = null;
+function persistDeviceStatesDebounced(): void {
+  if (saveDevicesTimeout) clearTimeout(saveDevicesTimeout);
+  saveDevicesTimeout = setTimeout(() => {
+    saveDevicesTimeout = null;
+    try {
+      const obj: Record<string, DeviceStateRecord> = {};
+      deviceStatesCache.forEach((val, key) => {
+        obj[key] = val;
+      });
+      fs.writeFileSync(DEVICE_STORE_PATH, JSON.stringify(obj), "utf8");
+    } catch (e) {
+      console.warn("[PortalStore] Failed saving .device_states_store.json:", e);
+    }
+  }, 1000);
+}
+
+export function registerOrUpdateDeviceState(
+  rawDeviceId: string,
+  updates: Partial<DeviceStateRecord> = {},
+  clientIp?: string
+): DeviceStateRecord {
+  const deviceId = String(rawDeviceId || "default_device").trim();
+  const machineId = String(updates.machineId || deviceId).trim();
+  const now = Date.now();
+
+  let existing = deviceStatesCache.get(deviceId);
+  if (!existing) {
+    existing = {
+      deviceId,
+      machineId,
+      deviceName: updates.deviceName || `جهاز ${deviceId.slice(-6)}`,
+      role: updates.role || "scanner",
+      activeGrade: updates.activeGrade || "الكل",
+      activeDays: updates.activeDays || "الكل",
+      activeSlotId: updates.activeSlotId || "auto",
+      lastSeen: now,
+      lastIp: clientIp,
+      status: "online",
+      recentScans: [],
+      customSettings: updates.customSettings || {},
+      createdAt: now,
+      updatedAt: now,
+    };
+  } else {
+    existing.lastSeen = now;
+    existing.status = "online";
+    if (clientIp) existing.lastIp = clientIp;
+    if (updates.deviceName) existing.deviceName = updates.deviceName;
+    if (updates.role) existing.role = updates.role;
+    if (updates.activeGrade !== undefined) existing.activeGrade = updates.activeGrade;
+    if (updates.activeDays !== undefined) existing.activeDays = updates.activeDays;
+    if (updates.activeSlotId !== undefined) existing.activeSlotId = updates.activeSlotId;
+    if (updates.customSettings) {
+      existing.customSettings = { ...existing.customSettings, ...updates.customSettings };
+    }
+    existing.updatedAt = now;
+  }
+
+  deviceStatesCache.set(deviceId, existing);
+  persistDeviceStatesDebounced();
+  return existing;
+}
+
+export function getDeviceState(rawDeviceId: string): DeviceStateRecord | null {
+  const deviceId = String(rawDeviceId || "").trim();
+  if (!deviceId) return null;
+  return deviceStatesCache.get(deviceId) || null;
+}
+
+export function getAllDeviceStates(): DeviceStateRecord[] {
+  const now = Date.now();
+  const list: DeviceStateRecord[] = [];
+  deviceStatesCache.forEach((dev) => {
+    // Flag as idle if no activity for 2 minutes, offline if 10 minutes
+    const diff = now - dev.lastSeen;
+    let status: "online" | "idle" | "offline" = dev.status;
+    if (diff > 10 * 60 * 1000) {
+      status = "offline";
+    } else if (diff > 2 * 60 * 1000) {
+      status = "idle";
+    }
+    list.push({ ...dev, status });
+  });
+  return list;
+}
+
+export function recordDeviceSpecificScan(
+  rawDeviceId: string,
+  scanInfo: {
+    barcode: string;
+    studentName?: string;
+    grade?: string;
+    days?: string;
+    status: "حضور" | "تأخير" | "غائب";
+    timeIso?: string;
+    timeDisplay?: string;
+  }
+): DeviceScanRecord {
+  const device = registerOrUpdateDeviceState(rawDeviceId);
+  const now = Date.now();
+  const timeIso = scanInfo.timeIso || new Date().toISOString();
+  const timeDisplay =
+    scanInfo.timeDisplay ||
+    new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+
+  const record: DeviceScanRecord = {
+    id: `devscan-${now}-${Math.random().toString(36).substring(2, 6)}`,
+    barcode: String(scanInfo.barcode).trim(),
+    studentName: scanInfo.studentName,
+    grade: scanInfo.grade,
+    days: scanInfo.days,
+    status: scanInfo.status,
+    timeIso,
+    timeDisplay,
+    timestamp: now,
+  };
+
+  device.recentScans.unshift(record);
+  if (device.recentScans.length > 100) {
+    device.recentScans = device.recentScans.slice(0, 100);
+  }
+  device.lastSeen = now;
+  device.updatedAt = now;
+  persistDeviceStatesDebounced();
+
+  // Broadcast SSE to this specific device stream
+  broadcastDeviceSSE(device.deviceId, {
+    type: "device_scan",
+    deviceId: device.deviceId,
+    scan: record,
+    timestamp: now,
+  });
+
+  return record;
+}
+
+export function getDeviceIsolatedLiveData(
+  rawDeviceId: string,
+  options: {
+    filterGrade?: string;
+    filterDays?: string;
+    limitScans?: number;
+    includeStudents?: boolean;
+  } = {}
+): {
+  success: boolean;
+  deviceId: string;
+  device: DeviceStateRecord;
+  liveStats: {
+    totalStudents: number;
+    matchingStudents: number;
+    todayAttendanceCount: number;
+    todayAbsentCount: number;
+    todayLateCount: number;
+  };
+  deviceScans: DeviceScanRecord[];
+  activeGrade: string;
+  activeDays: string;
+  activeSlotId: string;
+  students?: StudentRecord[];
+  todayAttendanceMap: Record<string, string>;
+  systemTime: string;
+  systemVersion: number;
+} {
+  const device = registerOrUpdateDeviceState(rawDeviceId, {
+    activeGrade: options.filterGrade,
+    activeDays: options.filterDays,
+  });
+
+  const activeGrade = options.filterGrade || device.activeGrade || "الكل";
+  const activeDays = options.filterDays || device.activeDays || "الكل";
+  const limit = options.limitScans || 50;
+
+  // Filter students matching this device's grade/days scope
+  let matching = systemDataCache.students;
+  if (activeGrade && activeGrade !== "الكل") {
+    matching = matching.filter(
+      (s) => s.groupGrade === activeGrade || s.grade === activeGrade
+    );
+  }
+  if (activeDays && activeDays !== "الكل") {
+    matching = matching.filter(
+      (s) => s.groupDays === activeDays || s.days === activeDays
+    );
+  }
+
+  // Calculate live stats
+  let presentCount = 0;
+  let lateCount = 0;
+  let absentCount = 0;
+
+  const todayAttendanceMap: Record<string, string> = {};
+  matching.forEach((s) => {
+    const bCode = String(s.barcode).trim();
+    const st = systemDataCache.attendanceToday[bCode];
+    if (st) {
+      todayAttendanceMap[bCode] = st;
+      if (st === "حضور") presentCount++;
+      else if (st === "تأخير") lateCount++;
+      else if (st === "غائب") absentCount++;
+    }
+  });
+
+  return {
+    success: true,
+    deviceId: device.deviceId,
+    device,
+    liveStats: {
+      totalStudents: systemDataCache.students.length,
+      matchingStudents: matching.length,
+      todayAttendanceCount: presentCount,
+      todayLateCount: lateCount,
+      todayAbsentCount: absentCount,
+    },
+    deviceScans: device.recentScans.slice(0, limit),
+    activeGrade,
+    activeDays,
+    activeSlotId: device.activeSlotId || "auto",
+    students: options.includeStudents ? matching : undefined,
+    todayAttendanceMap,
+    systemTime: new Date().toISOString(),
+    systemVersion: systemDataCache.version,
+  };
+}
+
+// Dedicated Device-Specific SSE Connections
+interface DeviceSSEClient {
+  deviceId: string;
+  res: Response;
+  connectedAt: number;
+}
+
+const activeDeviceSSEClients = new Map<string, Set<DeviceSSEClient>>();
+
+export function registerDeviceSSEClient(deviceId: string, res: Response): () => void {
+  const cleanId = String(deviceId || "default_device").trim();
+  const client: DeviceSSEClient = {
+    deviceId: cleanId,
+    res,
+    connectedAt: Date.now(),
+  };
+
+  if (!activeDeviceSSEClients.has(cleanId)) {
+    activeDeviceSSEClients.set(cleanId, new Set());
+  }
+  activeDeviceSSEClients.get(cleanId)!.add(client);
+
+  // Initial greeting
+  res.write(
+    `data: ${JSON.stringify({
+      type: "device_connected",
+      deviceId: cleanId,
+      timestamp: Date.now(),
+    })}\n\n`
+  );
+
+  return () => {
+    const set = activeDeviceSSEClients.get(cleanId);
+    if (set) {
+      set.delete(client);
+      if (set.size === 0) activeDeviceSSEClients.delete(cleanId);
+    }
+  };
+}
+
+export function broadcastDeviceSSE(deviceId: string, event: Record<string, any>): void {
+  const cleanId = String(deviceId || "").trim();
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+
+  // Send to target device subscribers
+  const targetSet = activeDeviceSSEClients.get(cleanId);
+  if (targetSet) {
+    targetSet.forEach((client) => {
+      try {
+        client.res.write(payload);
+      } catch {
+        targetSet.delete(client);
+      }
+    });
+  }
+
+  // Also broadcast to broadcast/all subscribers
+  const allSet = activeDeviceSSEClients.get("*");
+  if (allSet) {
+    allSet.forEach((client) => {
+      try {
+        client.res.write(payload);
+      } catch {
+        allSet.delete(client);
+      }
+    });
+  }
+}
+
+// Keepalive Ping for Device Streams every 20 seconds
+setInterval(() => {
+  activeDeviceSSEClients.forEach((set) => {
+    set.forEach((client) => {
+      try {
+        client.res.write(`: ping-device\n\n`);
+      } catch {
+        set.delete(client);
+      }
+    });
+  });
+}, 20000);
+
 // Initialize immediately on file load
 initPortalStore();
