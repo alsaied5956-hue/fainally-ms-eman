@@ -249,12 +249,28 @@ export async function syncParentAccountsFromCloud(force: boolean = false): Promi
   }
   syncAccountsInFlight = (async () => {
     try {
+      // 1. Fast Express Server Cache Sync (<5ms, zero Firestore quota)
+      try {
+        const resp = await fetch("/api/portal/accounts-sync");
+        if (resp.ok) {
+          const json = await resp.json();
+          if (json?.success && json?.accounts && typeof json.accounts === "object") {
+            const merged = { ...local, ...json.accounts };
+            saveLocalParentAccounts(merged);
+            lastAccountsSyncTime = Date.now();
+            return merged;
+          }
+        }
+      } catch {
+        // Fall back to Firestore below
+      }
+
       await ensureFirebaseAuth();
       if (db) {
         let merged = { ...local };
         let hasChanges = false;
 
-        // 1. Fetch system_state registry
+        // 2. Fetch system_state registry
         try {
           const regSnap = await getDoc(doc(db, "system_state", "portal_accounts_registry"));
           if (regSnap.exists()) {
@@ -264,24 +280,6 @@ export async function syncParentAccountsFromCloud(force: boolean = false): Promi
               hasChanges = true;
             }
           }
-        } catch {}
-
-        // 2. Fetch parent_accounts collection (catches individual mobile activations)
-        try {
-          const colSnap = await getDocs(collection(db, "parent_accounts"));
-          colSnap.forEach((docSnap) => {
-            const accData = docSnap.data() as ParentAccount;
-            const bCode = docSnap.id || accData?.studentBarcode;
-            if (bCode && accData) {
-              if (accData.status === "deleted") {
-                delete merged[bCode];
-                hasChanges = true;
-              } else if (accData.status === "active" || accData.status === "disabled") {
-                merged[bCode] = { ...merged[bCode], ...accData };
-                hasChanges = true;
-              }
-            }
-          });
         } catch {}
 
         if (hasChanges) {
@@ -390,6 +388,15 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
         body: JSON.stringify({ barcode: account.studentBarcode, reason: reasonText }),
       }).catch(() => {});
     } catch {}
+  }
+
+  // Fast Express Server Persistence (<5ms, 0 quota)
+  if (typeof window !== "undefined") {
+    fetch("/api/portal/account-save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(account),
+    }).catch(() => {});
   }
 
   // Reliable cloud persistence tied to Firestore (Executed in parallel without blocking)
@@ -892,36 +899,16 @@ export function subscribeToParentAccountLiveStatus(
         },
         () => {}
       );
-
-      // C. Listen to cloud registry updates
-      unsubscribeRegistry = onSnapshot(
-        doc(db, "system_state", "portal_accounts_registry"),
-        (snap) => {
-          if (isCancelled || hasFiredRevocation) return;
-          if (snap.exists()) {
-            const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
-            if (regData) {
-              const acc = regData[targetBarcode];
-              if (!acc || acc.status === "deleted") {
-                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-              } else if (acc.status === "disabled") {
-                triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-              }
-            }
-          }
-        },
-        () => {}
-      );
     }
   } catch (e) {
     console.warn("Notice attaching Firestore snapshot listener:", e);
   }
 
-  // 6. Fast server check & heartbeat (checks every 1.5s for instant phone logout)
+  // 5. Lightweight server check & heartbeat (checks server in-memory cache with 0 Firestore reads)
   const checkStatus = async () => {
     if (isCancelled || hasFiredRevocation) return;
     try {
-      // Direct server status check (lightweight HTTP JSON call, ~10ms)
+      // 1. Direct server status check (lightweight HTTP JSON call, ~5ms, zero Firestore quota)
       try {
         const resp = await fetch(`/api/account-status?barcode=${encodeURIComponent(targetBarcode)}`, {
           cache: "no-store",
@@ -935,37 +922,11 @@ export function subscribeToParentAccountLiveStatus(
         }
       } catch {}
 
-      // LocalStorage check
+      // 2. LocalStorage check (0ms, 0 network)
       const localAccs = getLocalParentAccounts();
       const localAcc = localAccs[targetBarcode];
       if (localAcc && (localAcc.status === "deleted" || localAcc.status === "disabled")) {
         triggerRevoke(localAcc.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-        return;
-      }
-
-      if (!db || isCancelled || hasFiredRevocation) return;
-
-      // Firestore direct doc check
-      const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
-      if (!snap.exists()) {
-        triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-        return;
-      }
-      const data = snap.data() as ParentAccount;
-      if (data) {
-        if (data.status === "deleted") {
-          triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-          return;
-        } else if (data.status === "disabled") {
-          triggerRevoke(data.reason || "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-          return;
-        }
-      }
-
-      // Direct tombstone check in account_revocations
-      const revSnap = await getDoc(doc(db, "account_revocations", targetBarcode));
-      if (revSnap.exists() && revSnap.data()?.revoked) {
-        triggerRevoke(revSnap.data()?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
         return;
       }
     } catch {}
@@ -983,8 +944,8 @@ export function subscribeToParentAccountLiveStatus(
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
 
-  // Active 1.5-second heartbeat for instant automatic phone logout
-  const pollInterval = setInterval(checkStatus, 1500);
+  // Active heartbeat for server cache check (zero Firestore quota)
+  const pollInterval = setInterval(checkStatus, 15000);
 
   // Run initial check immediately
   checkStatus();
@@ -1005,7 +966,6 @@ export function subscribeToParentAccountLiveStatus(
     clearInterval(pollInterval);
     if (unsubscribeDoc) unsubscribeDoc();
     if (unsubscribeRevocations) unsubscribeRevocations();
-    if (unsubscribeRegistry) unsubscribeRegistry();
   };
 }
 

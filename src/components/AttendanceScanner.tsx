@@ -305,6 +305,22 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 1️⃣ Live Event Pipeline: Instant broadcast to Firestore path `live_events/today`
     pushLiveAttendanceEvent(student.barcode, calculatedStatus, now.getTime());
 
+    // ⚡ Ultra-fast server live stream broadcast + instant WebPush (<50ms, zero Firestore quota)
+    fetch("/api/portal/live-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        barcode: student.barcode,
+        status: calculatedStatus,
+        timeIso: now.toISOString(),
+        timeDisplay: nowTimeStr,
+        studentName: student.name,
+        grade: student.groupGrade,
+        days: student.groupDays,
+        scannedBy: "الماسح",
+      }),
+    }).catch(() => {});
+
     // 🔔 Native Background Web Push: Dispatches to parent device even when phone is locked or app is closed
     dispatchPushNotification({
       targetUserIds: [student.barcode, student.parentPhone || "", student.phone || ""].filter(Boolean),
@@ -554,6 +570,19 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 1️⃣ Live Event Pipeline: Instant broadcast for absent and late students to `live_events/today`
     absentList.forEach((a) => {
       pushLiveAttendanceEvent(a.student.barcode, "غائب", Date.now());
+      fetch("/api/portal/live-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: a.student.barcode,
+          status: "غائب",
+          timeIso: new Date().toISOString(),
+          studentName: a.student.name,
+          grade: a.student.groupGrade,
+          days: a.student.groupDays,
+          scannedBy: "النظام",
+        }),
+      }).catch(() => {});
       dispatchPushNotification({
         targetUserIds: [a.student.barcode, a.student.parentPhone || "", a.student.phone || ""].filter(Boolean),
         title: "🔴 تنبيه غياب عن الحصة",
@@ -566,6 +595,19 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     });
     lateList.forEach((l) => {
       pushLiveAttendanceEvent(l.student.barcode, "تأخير", Date.now());
+      fetch("/api/portal/live-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: l.student.barcode,
+          status: "تأخير",
+          timeIso: new Date().toISOString(),
+          studentName: l.student.name,
+          grade: l.student.groupGrade,
+          days: l.student.groupDays,
+          scannedBy: "النظام",
+        }),
+      }).catch(() => {});
       dispatchPushNotification({
         targetUserIds: [l.student.barcode, l.student.parentPhone || "", l.student.phone || ""].filter(Boolean),
         title: "⚠️ تنبيه تأخير عن موعد الحصة",

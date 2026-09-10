@@ -921,6 +921,15 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
       syncedAtIso: new Date().toISOString(),
     });
 
+    // Proactively sync state to local Express portal server (sub-10ms, 0 Firestore quota)
+    if (typeof window !== "undefined") {
+      fetch("/api/portal/system-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cleaned),
+      }).catch(() => {});
+    }
+
     let docPayload: Record<string, unknown>;
     let compressedPayloadString: string | undefined = undefined;
 
@@ -1841,8 +1850,10 @@ export function restartCloudListener(): void {
   ensureActiveSnapshotListener();
 }
 
+let lastSystemSyncETag = "";
+
 /**
- * Proactively and immediately pulls the latest state from Firestore Cloud Database,
+ * Proactively and immediately pulls the latest state from Firestore Cloud Database or Server Cache,
  * decompresses it, merges it seamlessly with local disk data, and notifies all screens.
  * Especially crucial when a sleeping or powered-off device wakes up or opens the application!
  */
@@ -1850,7 +1861,7 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
   if (typeof window === "undefined" || !navigator.onLine) return false;
 
   const now = Date.now();
-  // Cooldown: Do not spam getDoc if we pulled within 15 seconds
+  // Cooldown: Do not spam if we pulled within 15 seconds
   if (now - lastSuccessfulPullTime < 15000 && !pullInFlightPromise) {
     return true;
   }
@@ -1861,6 +1872,46 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
 
   pullInFlightPromise = (async () => {
     try {
+      // 1. Ultra-fast HTTP ETag sync from local Express server cache (<5ms, zero Firestore quota)
+      try {
+        const syncResp = await fetch("/api/portal/system-sync", {
+          headers: lastSystemSyncETag ? { "If-None-Match": lastSystemSyncETag } : {},
+        });
+
+        if (syncResp.status === 304) {
+          // 304 Not Modified: server has exact same state, zero data transfer required
+          lastSnapshotReceivedAt = Date.now();
+          lastSuccessfulPullTime = Date.now();
+          return true;
+        } else if (syncResp.status === 200) {
+          const etag = syncResp.headers.get("ETag");
+          if (etag) lastSystemSyncETag = etag;
+          const serverData = await syncResp.json();
+          if (serverData && typeof serverData === "object" && Array.isArray(serverData.students)) {
+            const currentLocal = loadLocalData();
+            const merged = mergeCloudDataWithLocal(currentLocal, serverData);
+
+            const incomingHash = JSON.stringify(merged);
+            if (incomingHash !== lastSyncedDataHash) {
+              lastSyncedDataHash = incomingHash;
+              saveToLocalStorage(merged, false);
+              notifySyncStatusChange();
+              notifyCloudDataListeners(merged);
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
+              }
+            }
+
+            lastSnapshotReceivedAt = Date.now();
+            lastSuccessfulPullTime = Date.now();
+            return true;
+          }
+        }
+      } catch {
+        // Fall back to Firestore if server is unreachable
+      }
+
+      // 2. Fallback to Firestore getDoc if server was unreachable
       try {
         await ensureFirebaseAuth();
       } catch {}

@@ -23,6 +23,18 @@ import {
   executeWithRetry,
   cleanAndParseJSON,
 } from "./server/geminiService";
+import {
+  getSystemCache,
+  recordLiveScan,
+  getStudentPortalData,
+  getSystemETag,
+  updateSystemDataPartial,
+  getAllParentAccounts,
+  saveParentAccountRecord,
+  registerPortalSSEClient,
+  unregisterPortalSSEClient,
+  broadcastPortalSSE,
+} from "./server/portalStore";
 
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 const db = getFirestore(fbApp, (firebaseConfig as any).firestoreDatabaseId || undefined);
@@ -274,7 +286,136 @@ loadStoredSubscriptions();
 
 // 1. Health check
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", subscriptions: subscriptionsCache.size, timestamp: Date.now() });
+  res.json({
+    status: "ok",
+    subscriptions: subscriptionsCache.size,
+    studentsLoaded: getSystemCache().students.length,
+    timestamp: Date.now(),
+  });
+});
+
+// ----------------------------------------------------
+// HIGH-PERFORMANCE PARENT PORTAL & REAL-TIME EVENT STREAM
+// Serves parent requests with zero Firestore quota consumption
+// ----------------------------------------------------
+
+// SSE Real-time stream for instant scans, attendance, and account events
+app.get("/api/portal/live-stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const clientId = `portal_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const barcode = req.query.barcode ? String(req.query.barcode).trim() : undefined;
+  const rawAliases = req.query.aliases ? String(req.query.aliases) : "";
+  const aliases = rawAliases ? rawAliases.split(",").map((s) => s.trim()).filter(Boolean) : [];
+
+  registerPortalSSEClient(clientId, res, barcode, aliases);
+
+  req.on("close", () => {
+    unregisterPortalSSEClient(clientId);
+  });
+});
+
+// Instant Scan Endpoint: Teachers scan barcode -> Instant SSE to parents & instant WebPush (<50ms)
+app.post("/api/portal/live-scan", async (req, res) => {
+  try {
+    const { barcode, status, timeIso, timeDisplay, studentName, grade, days, scannedBy } = req.body;
+    if (!barcode || !status) {
+      return res.status(400).json({ error: "barcode and status are required" });
+    }
+
+    const result = recordLiveScan({
+      barcode,
+      status,
+      timeIso,
+      timeDisplay,
+      studentName,
+      grade,
+      days,
+      scannedBy,
+    });
+
+    // Send instant WebPush to parent phone and student barcode targets
+    const student = result.student;
+    const finalName = student?.name || studentName || "الطالب";
+    const finalTime = timeDisplay || new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+    const targets: string[] = [String(barcode).trim()];
+    if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+    if (student?.phone) targets.push(String(student.phone).trim());
+
+    const statusTitle =
+      status === "حضور"
+        ? "🟢 تسجيل حضور في المركز"
+        : status === "تأخير"
+        ? "⚠️ تنبيه تأخير عن الحصة"
+        : "🔴 تنبيه غياب عن الحصة";
+
+    sendWebPushToTargets({
+      targetUserIds: targets,
+      title: statusTitle,
+      body: `تم تسجيل ${status} للطالب (${finalName}) في مركز الرياضيات (${finalTime}).`,
+      type: "attendance",
+      sound: "/notification.wav",
+      icon: "/icon.svg",
+      badge: "/icon.svg",
+      tag: `att-${barcode}-${Date.now()}`,
+      eventId: `att-${barcode}-${status}-${Date.now()}`,
+      url: "/?tab=attendance",
+    }).catch((e) => console.warn("[LiveScan] Push error:", e?.message || e));
+
+    return res.json({ success: true, scanInfo: result.scanInfo });
+  } catch (err: any) {
+    console.error("[LiveScan] Error:", err);
+    return res.status(500).json({ error: err.message || "Failed to record scan" });
+  }
+});
+
+// Ultra-fast Student Portal Data (serves parents in <5ms from memory)
+app.get("/api/portal/student-data", (req, res) => {
+  const barcode = req.query.barcode ? String(req.query.barcode).trim() : "";
+  if (!barcode) {
+    return res.status(400).json({ success: false, message: "كود الطالب أو رقم الهاتف مطلوب" });
+  }
+  const data = getStudentPortalData(barcode);
+  res.setHeader("Cache-Control", "private, no-cache, no-transform");
+  return res.json(data);
+});
+
+// Full System Sync with HTTP ETag (304 Not Modified when nothing changed, saving bandwidth)
+app.get("/api/portal/system-sync", (req, res) => {
+  const etag = getSystemETag();
+  if (req.headers["if-none-match"] === etag) {
+    return res.status(304).end();
+  }
+  res.setHeader("ETag", etag);
+  res.setHeader("Cache-Control", "public, max-age=3, stale-while-revalidate=10");
+  return res.json(getSystemCache());
+});
+
+// Teacher System State Mutation: updates in-memory cache and persists to disk
+app.post("/api/portal/system-sync", (req, res) => {
+  try {
+    updateSystemDataPartial(req.body);
+    return res.json({ success: true, timestamp: Date.now() });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Parent Accounts Sync & Save
+app.get("/api/portal/accounts-sync", (_req, res) => {
+  return res.json({ success: true, accounts: getAllParentAccounts() });
+});
+
+app.post("/api/portal/account-save", (req, res) => {
+  try {
+    const saved = saveParentAccountRecord(req.body);
+    return res.json({ success: true, account: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // ----------------------------------------------------
@@ -807,9 +948,19 @@ app.post("/api/send-push", async (req, res) => {
 // 24/7 AUTONOMOUS BACKGROUND FIRESTORE LISTENERS
 // Guarantees push notifications with audio chime even when app is closed
 // ----------------------------------------------------
-let cachedStudents: any[] = [];
+let cachedStudents: any[] = getSystemCache().students;
 let knownPayments = new Set<string>();
-let isInitialPaymentsLoaded = false;
+// Pre-populate known payments so baseline backup payments do not trigger false notifications
+try {
+  for (const [mKey, pMap] of Object.entries(getSystemCache().payments || {})) {
+    if (pMap && typeof pMap === "object") {
+      for (const bCode of Object.keys(pMap)) {
+        knownPayments.add(`${mKey}:${bCode}`);
+      }
+    }
+  }
+} catch {}
+let isInitialPaymentsLoaded = true;
 let lastProcessedLiveEventTime = Date.now() - 30000;
 
 let unsubPushSubs: (() => void) | null = null;
