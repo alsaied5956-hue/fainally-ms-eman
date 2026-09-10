@@ -144,8 +144,36 @@ export async function syncParentAccountsFromCloud(): Promise<Record<string, Pare
  */
 export async function persistParentAccount(account: ParentAccount): Promise<void> {
   const accounts = getLocalParentAccounts();
+  const nowIso = new Date().toISOString();
+
+  if (account.status === "active") {
+    if (!account.activatedAt) {
+      account.activatedAt = nowIso;
+    }
+    delete account.deletedAt;
+  }
+
   accounts[account.studentBarcode] = account;
   saveLocalParentAccounts(accounts);
+
+  // If status is active, broadcast activation to all tabs
+  if (account.status === "active") {
+    accountEventsBus?.postMessage({
+      type: "ACCOUNT_ACTIVATED",
+      barcode: account.studentBarcode,
+      activatedAt: account.activatedAt || nowIso,
+    });
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("eman_account_activated", {
+          detail: {
+            barcode: account.studentBarcode,
+            activatedAt: account.activatedAt || nowIso,
+          },
+        })
+      );
+    }
+  }
 
   // If status is disabled or deleted, immediately broadcast revocation to log out parent device
   if (account.status === "disabled" || account.status === "deleted") {
@@ -157,6 +185,7 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
       type: "ACCOUNT_REVOKED",
       barcode: account.studentBarcode,
       reason: reasonText,
+      revokedAt: account.deletedAt || nowIso,
     });
     if (typeof window !== "undefined") {
       window.dispatchEvent(
@@ -164,6 +193,7 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
           detail: {
             barcode: account.studentBarcode,
             reason: reasonText,
+            revokedAt: account.deletedAt || nowIso,
           },
         })
       );
@@ -187,7 +217,7 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
       allAccs[account.studentBarcode] = account;
       await setDoc(
         doc(db, "system_state", "portal_accounts_registry"),
-        { accounts: allAccs, updatedAt: new Date().toISOString() },
+        { accounts: allAccs, updatedAt: nowIso },
         { merge: true }
       );
     }
@@ -202,15 +232,23 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
 export async function deleteParentAccount(studentBarcode: string): Promise<void> {
   const cleanBarcode = String(studentBarcode).trim();
   const accounts = getLocalParentAccounts();
+  const existing = accounts[cleanBarcode];
+  const nowIso = new Date().toISOString();
+  const revokeReason = "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
+
+  if (existing) {
+    existing.status = "deleted";
+    existing.deletedAt = nowIso;
+  }
   delete accounts[cleanBarcode];
   saveLocalParentAccounts(accounts);
 
   // 1. Broadcast revocation immediately across same device tabs
-  const revokeReason = "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
   accountEventsBus?.postMessage({
     type: "ACCOUNT_REVOKED",
     barcode: cleanBarcode,
     reason: revokeReason,
+    revokedAt: nowIso,
   });
   if (typeof window !== "undefined") {
     window.dispatchEvent(
@@ -218,6 +256,7 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
         detail: {
           barcode: cleanBarcode,
           reason: revokeReason,
+          revokedAt: nowIso,
         },
       })
     );
@@ -230,24 +269,22 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
       // First, update document status to "deleted" so active Firestore snapshot listeners trigger immediately
       await setDoc(
         doc(db, "parent_accounts", cleanBarcode),
-        { studentBarcode: cleanBarcode, status: "deleted", deletedAt: new Date().toISOString() },
+        { studentBarcode: cleanBarcode, status: "deleted", deletedAt: nowIso, reason: revokeReason },
         { merge: true }
       );
 
       // Second, register in dedicated account_revocations collection so it acts as an explicit tombstone
       await setDoc(doc(db, "account_revocations", cleanBarcode), {
         barcode: cleanBarcode,
+        revoked: true,
         reason: revokeReason,
-        revokedAt: new Date().toISOString(),
+        revokedAt: nowIso,
       });
 
-      // Third, delete the doc from parent_accounts
-      await deleteDoc(doc(db, "parent_accounts", cleanBarcode));
-
-      // Fourth, update the cloud accounts registry
+      // Third, update the cloud accounts registry
       await setDoc(
         doc(db, "system_state", "portal_accounts_registry"),
-        { accounts, updatedAt: new Date().toISOString() },
+        { accounts, updatedAt: nowIso },
         { merge: true }
       );
     }
@@ -268,54 +305,92 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
  */
 export function subscribeToParentAccountLiveStatus(
   studentBarcode: string,
-  onRevoked: (reason: string) => void
+  onRevoked: (reason: string) => void,
+  initialActivatedAt?: string
 ): () => void {
   const targetBarcode = String(studentBarcode).trim();
   let isCancelled = false;
   let hasFiredRevocation = false;
 
-  const triggerRevoke = (reason: string) => {
+  // Activation epoch: any revocation with timestamp <= activeEpoch is considered obsolete (from previous deletion)
+  let activeEpoch = initialActivatedAt
+    ? new Date(initialActivatedAt).getTime()
+    : Date.now() - 5000;
+
+  const isRevocationLegitimate = (revokedAtStr?: string) => {
+    if (!revokedAtStr) return false;
+    const revTime = new Date(revokedAtStr).getTime();
+    if (isNaN(revTime)) return false;
+    // Must have occurred strictly AFTER this account was activated
+    return revTime > activeEpoch;
+  };
+
+  const triggerRevoke = (reason: string, revokedAtStr?: string) => {
     if (isCancelled || hasFiredRevocation) return;
+    if (revokedAtStr && !isRevocationLegitimate(revokedAtStr)) {
+      // This revocation happened prior to the current activation. Ignore it!
+      return;
+    }
     hasFiredRevocation = true;
     onRevoked(reason);
   };
 
   // 1. BroadcastChannel listener (same device / multi-tab)
   const handleBusMessage = (ev: MessageEvent) => {
-    if (
-      ev.data?.type === "ACCOUNT_REVOKED" &&
-      String(ev.data?.barcode).trim() === targetBarcode
-    ) {
-      triggerRevoke(ev.data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+    if (String(ev.data?.barcode).trim() !== targetBarcode) return;
+
+    if (ev.data?.type === "ACCOUNT_ACTIVATED") {
+      const actTime = ev.data.activatedAt ? new Date(ev.data.activatedAt).getTime() : Date.now();
+      activeEpoch = Math.max(activeEpoch, actTime);
+      hasFiredRevocation = false;
+    } else if (ev.data?.type === "ACCOUNT_REVOKED") {
+      triggerRevoke(ev.data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.", ev.data.revokedAt);
     }
   };
   accountEventsBus?.addEventListener("message", handleBusMessage);
 
   // 2. Window event listener (same tab)
-  const handleWindowEvent = (ev: Event) => {
+  const handleRevokeWindowEvent = (ev: Event) => {
     const customEv = ev as CustomEvent;
     if (String(customEv.detail?.barcode).trim() === targetBarcode) {
-      triggerRevoke(customEv.detail.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+      triggerRevoke(
+        customEv.detail.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.",
+        customEv.detail?.revokedAt
+      );
     }
   };
+
+  const handleActivatedWindowEvent = (ev: Event) => {
+    const customEv = ev as CustomEvent;
+    if (String(customEv.detail?.barcode).trim() === targetBarcode) {
+      const actTime = customEv.detail?.activatedAt
+        ? new Date(customEv.detail.activatedAt).getTime()
+        : Date.now();
+      activeEpoch = Math.max(activeEpoch, actTime);
+      hasFiredRevocation = false;
+    }
+  };
+
   if (typeof window !== "undefined") {
-    window.addEventListener("eman_account_revoked", handleWindowEvent);
+    window.addEventListener("eman_account_revoked", handleRevokeWindowEvent);
+    window.addEventListener("eman_account_activated", handleActivatedWindowEvent);
   }
 
   // 3. Storage event listener (cross-tab LocalStorage modification)
   const handleStorageEvent = (ev: StorageEvent) => {
-    if (ev.key === LS_PARENT_ACCOUNTS) {
-      if (!ev.newValue) {
-        triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-        return;
-      }
+    if (ev.key === LS_PARENT_ACCOUNTS && ev.newValue) {
       try {
         const accs = JSON.parse(ev.newValue) as Record<string, ParentAccount>;
         const acc = accs[targetBarcode];
-        if (!acc || acc.status === "deleted") {
-          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-        } else if (acc.status === "disabled") {
-          triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+        if (acc) {
+          if (acc.status === "active" && acc.activatedAt) {
+            activeEpoch = Math.max(activeEpoch, new Date(acc.activatedAt).getTime());
+            hasFiredRevocation = false;
+          } else if (acc.status === "deleted" && isRevocationLegitimate(acc.deletedAt)) {
+            triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", acc.deletedAt);
+          } else if (acc.status === "disabled") {
+            triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+          }
         }
       } catch {}
     }
@@ -338,15 +413,16 @@ export function subscribeToParentAccountLiveStatus(
           doc(db, "parent_accounts", targetBarcode),
           (snap) => {
             if (isCancelled) return;
-            // Document does not exist => deleted by admin remotely!
-            if (!snap.exists()) {
-              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-              return;
-            }
+            // Note: Never trigger revoke on non-existence (network/cache jitter).
+            // Only trigger on explicit status === 'deleted' or 'disabled'.
+            if (!snap.exists()) return;
             const data = snap.data() as ParentAccount;
             if (data) {
-              if (data.status === "deleted") {
-                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              if (data.status === "active" && data.activatedAt) {
+                activeEpoch = Math.max(activeEpoch, new Date(data.activatedAt).getTime());
+                hasFiredRevocation = false;
+              } else if (data.status === "deleted" && isRevocationLegitimate(data.deletedAt)) {
+                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", data.deletedAt);
               } else if (data.status === "disabled") {
                 triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
               }
@@ -364,7 +440,9 @@ export function subscribeToParentAccountLiveStatus(
             if (isCancelled) return;
             if (snap.exists()) {
               const revData = snap.data();
-              triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              if (revData?.revoked && isRevocationLegitimate(revData.revokedAt)) {
+                triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.", revData.revokedAt);
+              }
             }
           },
           (err) => {
@@ -381,10 +459,15 @@ export function subscribeToParentAccountLiveStatus(
               const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
               if (regData) {
                 const acc = regData[targetBarcode];
-                if (!acc || acc.status === "deleted") {
-                  triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-                } else if (acc.status === "disabled") {
-                  triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+                if (acc) {
+                  if (acc.status === "active" && acc.activatedAt) {
+                    activeEpoch = Math.max(activeEpoch, new Date(acc.activatedAt).getTime());
+                    hasFiredRevocation = false;
+                  } else if (acc.status === "deleted" && isRevocationLegitimate(acc.deletedAt)) {
+                    triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", acc.deletedAt);
+                  } else if (acc.status === "disabled") {
+                    triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+                  }
                 }
               }
             }
@@ -405,17 +488,18 @@ export function subscribeToParentAccountLiveStatus(
     try {
       await ensureFirebaseAuth();
       if (db) {
-        // Check if doc exists
         const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
-        if (!snap.exists()) {
-          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-          return;
-        }
-        const data = snap.data() as ParentAccount;
-        if (data.status === "deleted") {
-          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-        } else if (data.status === "disabled") {
-          triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+        if (snap.exists()) {
+          const data = snap.data() as ParentAccount;
+          if (data) {
+            if (data.status === "active" && data.activatedAt) {
+              activeEpoch = Math.max(activeEpoch, new Date(data.activatedAt).getTime());
+            } else if (data.status === "deleted" && isRevocationLegitimate(data.deletedAt)) {
+              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", data.deletedAt);
+            } else if (data.status === "disabled") {
+              triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+            }
+          }
         }
       }
     } catch {}
@@ -432,13 +516,14 @@ export function subscribeToParentAccountLiveStatus(
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
 
-  const pollInterval = setInterval(checkStatus, 12000);
+  const pollInterval = setInterval(checkStatus, 15000);
 
   return () => {
     isCancelled = true;
     accountEventsBus?.removeEventListener("message", handleBusMessage);
     if (typeof window !== "undefined") {
-      window.removeEventListener("eman_account_revoked", handleWindowEvent);
+      window.removeEventListener("eman_account_revoked", handleRevokeWindowEvent);
+      window.removeEventListener("eman_account_activated", handleActivatedWindowEvent);
       window.removeEventListener("storage", handleStorageEvent);
       window.removeEventListener("focus", checkStatus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -598,6 +683,7 @@ export async function activateParentAccountDirectly(
     if (st) studentName = st.name;
   }
 
+  const nowIso = new Date().toISOString();
   const newAccount: ParentAccount = {
     studentBarcode: cleanBarcode,
     studentName: studentName || existing?.studentName,
@@ -605,8 +691,9 @@ export async function activateParentAccountDirectly(
     parentPhone: phone.trim(),
     password: password.trim(),
     status: "active",
-    createdAt: existing?.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: existing?.createdAt || nowIso,
+    activatedAt: nowIso,
+    updatedAt: nowIso,
   };
 
   accounts[cleanBarcode] = newAccount;
@@ -620,6 +707,12 @@ export async function activateParentAccountDirectly(
       await deleteDoc(doc(db, "account_revocations", cleanBarcode));
     }
   } catch {}
+
+  accountEventsBus?.postMessage({
+    type: "ACCOUNT_ACTIVATED",
+    barcode: cleanBarcode,
+    activatedAt: nowIso,
+  });
 
   return newAccount;
 }
@@ -636,6 +729,7 @@ export async function batchActivateParentAccounts(
   let count = 0;
   const activatedList: ParentAccount[] = [];
 
+  const nowIso = new Date().toISOString();
   for (const item of items) {
     const bCode = item.studentBarcode.trim();
     if (!bCode) continue;
@@ -649,7 +743,8 @@ export async function batchActivateParentAccounts(
         password: defaultPassword.trim() || "1234",
         status: "active",
         createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        activatedAt: nowIso,
+        updatedAt: nowIso,
       };
       accounts[bCode] = acc;
       activatedList.push(acc);
@@ -665,10 +760,15 @@ export async function batchActivateParentAccounts(
         try {
           await deleteDoc(doc(db, "account_revocations", acc.studentBarcode));
         } catch {}
+        accountEventsBus?.postMessage({
+          type: "ACCOUNT_ACTIVATED",
+          barcode: acc.studentBarcode,
+          activatedAt: nowIso,
+        });
       }
       await setDoc(
         doc(db, "system_state", "portal_accounts_registry"),
-        { accounts, updatedAt: new Date().toISOString() },
+        { accounts, updatedAt: nowIso },
         { merge: true }
       );
     }
@@ -793,7 +893,12 @@ export async function authenticatePortalLogin(
   }
 
   // Update last login timestamp locally immediately
-  account.lastLoginAt = new Date().toISOString();
+  const loginNowIso = new Date().toISOString();
+  account.lastLoginAt = loginNowIso;
+  if (!account.activatedAt) {
+    account.activatedAt = account.createdAt || loginNowIso;
+  }
+  delete account.deletedAt;
   accounts[account.studentBarcode] = account;
   saveLocalParentAccounts(accounts);
 

@@ -60,10 +60,14 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     const currentBarcode = String(session.account.studentBarcode).trim();
 
     // Realtime listener across Firestore, BroadcastChannel, and storage events
-    const unsubscribe = subscribeToParentAccountLiveStatus(currentBarcode, (reason) => {
-      setRevocationNotice(reason);
-      handleLogout(true);
-    });
+    const unsubscribe = subscribeToParentAccountLiveStatus(
+      currentBarcode,
+      (reason) => {
+        setRevocationNotice(reason);
+        handleLogout(true);
+      },
+      session.account.activatedAt
+    );
 
     return () => {
       unsubscribe();

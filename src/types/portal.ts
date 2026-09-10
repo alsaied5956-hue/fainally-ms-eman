@@ -9,6 +9,8 @@ export interface ParentAccount {
   status: "active" | "disabled" | "deleted";
   createdAt: string;
   updatedAt?: string;
+  activatedAt?: string;
+  deletedAt?: string;
   lastLoginAt?: string;
 }
 
