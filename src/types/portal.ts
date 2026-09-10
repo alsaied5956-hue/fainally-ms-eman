@@ -2,6 +2,7 @@ import { Student, PaymentRecord, GroupDays, GradeName } from "../types";
 
 export interface ParentAccount {
   studentBarcode: string;
+  studentName?: string;
   linkedBarcodes: string[];
   parentPhone: string;
   password: string;

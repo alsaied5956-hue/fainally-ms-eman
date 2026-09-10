@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import compression from "compression";
 import { createServer as createViteServer } from "vite";
 import webpush from "web-push";
 import { initializeApp, getApps } from "firebase/app";
@@ -20,6 +21,14 @@ const db = getFirestore(fbApp, (firebaseConfig as any).firestoreDatabaseId || un
 
 const app = express();
 const PORT = 3000;
+
+// High-performance gzip/deflate compression for all requests
+app.use(
+  compression({
+    threshold: 1024, // only compress responses above 1KB
+    level: 6,
+  })
+);
 
 app.use(express.json({ limit: "10mb" }));
 
@@ -353,8 +362,10 @@ app.post("/api/send-push", async (req, res) => {
       return res.status(400).json({ error: "title and body are required" });
     }
 
-    // Ensure subscriptions are fresh
-    await syncSubscriptionsFromFirestore();
+    // Ensure subscriptions are loaded (cached in-memory, zero latency)
+    if (subscriptionsCache.size === 0) {
+      await syncSubscriptionsFromFirestore();
+    }
 
     const result = await sendWebPushToTargets(req.body);
 
@@ -478,66 +489,70 @@ function setupAutonomousBackgroundPushListeners() {
     console.warn("[Background Push] failed to listen to live_events:", err.message);
   }
 
-  // 3. Listen to system_state/main_center_data for students and new payments
+  // 3. Listen to system_state/main_center_data for students and new payments (debounced)
+  let paymentCheckTimer: NodeJS.Timeout | null = null;
   try {
-    onSnapshot(doc(db, "system_state", "main_center_data"), async (snap) => {
+    onSnapshot(doc(db, "system_state", "main_center_data"), (snap) => {
       if (!snap.exists()) return;
       const data = snap.data() as any;
       if (Array.isArray(data?.students)) {
         cachedStudents = data.students;
       }
 
-      // Check payments
-      const payments = data?.payments;
-      if (payments && typeof payments === "object") {
-        const currentKeys = new Set<string>();
-        const newPaymentsToNotify: Array<{ monthKey: string; barcode: string; rec: any }> = [];
+      // Debounce payment checking to avoid blocking the event loop on rapid scan bursts
+      if (paymentCheckTimer) clearTimeout(paymentCheckTimer);
+      paymentCheckTimer = setTimeout(async () => {
+        const payments = data?.payments;
+        if (payments && typeof payments === "object") {
+          const currentKeys = new Set<string>();
+          const newPaymentsToNotify: Array<{ monthKey: string; barcode: string; rec: any }> = [];
 
-        for (const [mKey, map] of Object.entries(payments)) {
-          if (map && typeof map === "object") {
-            for (const [bCode, rec] of Object.entries(map as any)) {
-              if (rec && Number((rec as any).amount) > 0) {
-                const key = `${mKey}:${bCode}`;
-                currentKeys.add(key);
-                if (isInitialPaymentsLoaded && !knownPayments.has(key)) {
-                  newPaymentsToNotify.push({ monthKey: mKey, barcode: bCode, rec });
+          for (const [mKey, map] of Object.entries(payments)) {
+            if (map && typeof map === "object") {
+              for (const [bCode, rec] of Object.entries(map as any)) {
+                if (rec && Number((rec as any).amount) > 0) {
+                  const key = `${mKey}:${bCode}`;
+                  currentKeys.add(key);
+                  if (isInitialPaymentsLoaded && !knownPayments.has(key)) {
+                    newPaymentsToNotify.push({ monthKey: mKey, barcode: bCode, rec });
+                  }
                 }
               }
             }
           }
-        }
 
-        knownPayments = currentKeys;
-        if (!isInitialPaymentsLoaded) {
-          isInitialPaymentsLoaded = true;
-        } else {
-          for (const item of newPaymentsToNotify) {
-            const student = cachedStudents.find((s) => String(s.barcode).trim() === item.barcode);
-            const studentName = student?.name || item.rec?.studentName || "الطالب";
-            const amount = item.rec?.amount || 0;
-            const title = `💳 سداد مصاريف: ${studentName}`;
-            const body = `تم بنجاح سداد اشتراك شهر (${item.monthKey}) للطالب (${studentName}) بمبلغ ${amount} ج.م.`;
+          knownPayments = currentKeys;
+          if (!isInitialPaymentsLoaded) {
+            isInitialPaymentsLoaded = true;
+          } else {
+            for (const item of newPaymentsToNotify) {
+              const student = cachedStudents.find((s) => String(s.barcode).trim() === item.barcode);
+              const studentName = student?.name || item.rec?.studentName || "الطالب";
+              const amount = item.rec?.amount || 0;
+              const title = `💳 سداد مصاريف: ${studentName}`;
+              const body = `تم بنجاح سداد اشتراك شهر (${item.monthKey}) للطالب (${studentName}) بمبلغ ${amount} ج.م.`;
 
-            const targets: string[] = [item.barcode];
-            if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
-            if (student?.phone) targets.push(String(student.phone).trim());
-            targets.push("admin");
+              const targets: string[] = [item.barcode];
+              if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+              if (student?.phone) targets.push(String(student.phone).trim());
+              targets.push("admin");
 
-            console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
-            await sendWebPushToTargets({
-              targetUserIds: targets,
-              title,
-              body,
-              icon: "/icon.svg",
-              badge: "/icon.svg",
-              type: "payment",
-              sound: "/notification.wav",
-              url: `/?tab=expenses&barcode=${item.barcode}`,
-              eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
-            });
+              console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
+              await sendWebPushToTargets({
+                targetUserIds: targets,
+                title,
+                body,
+                icon: "/icon.svg",
+                badge: "/icon.svg",
+                type: "payment",
+                sound: "/notification.wav",
+                url: `/?tab=expenses&barcode=${item.barcode}`,
+                eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
+              });
+            }
           }
         }
-      }
+      }, 1000);
     }, (err) => {
       console.warn("[Background Push] main_center_data onSnapshot warning:", err.message);
     });
@@ -562,8 +577,28 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    // High-performance static serving with HTTP caching
+    app.use(
+      express.static(distPath, {
+        maxAge: "1d",
+        etag: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.includes("/assets/")) {
+            // Hashed JS/CSS chunks are immutable and safe to cache for 1 year
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          } else if (
+            filePath.endsWith("index.html") ||
+            filePath.endsWith("sw.js") ||
+            filePath.endsWith("manifest.json")
+          ) {
+            // HTML and service worker must revalidate immediately
+            res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
+          }
+        },
+      })
+    );
     app.get("*", (_req, res) => {
+      res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
       res.sendFile(path.join(distPath, "index.html"));
     });
   }

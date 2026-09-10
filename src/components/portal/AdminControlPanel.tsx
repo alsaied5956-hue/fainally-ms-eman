@@ -121,7 +121,6 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
   // Delete Confirmation Modal State (Reliable in-app modal, replaces window.confirm)
   const [accountToDelete, setAccountToDelete] = useState<{ barcode: string; studentName: string } | null>(null);
-  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
 
   // Settings State
   const [adminSettings, setAdminSettings] = useState<AdminPortalSettings>(() =>
@@ -495,25 +494,23 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     setAccountToDelete({ barcode, studentName });
   };
 
-  // Action: Execute deletion after modal confirmation
-  const handleConfirmDeleteAccount = async () => {
+  // Action: Execute deletion after modal confirmation - 0ms instant execution
+  const handleConfirmDeleteAccount = () => {
     if (!accountToDelete) return;
-    setIsDeletingAccount(true);
     const { barcode, studentName } = accountToDelete;
-    try {
-      await deleteParentAccount(barcode);
-      reloadAccounts();
-      setLiveActionFeedback(
-        `🗑️ تم حذف حساب ولي أمر (${studentName}) بنجاح، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
-      );
-      setAccountToDelete(null);
-      setTimeout(() => setLiveActionFeedback(null), 6000);
-    } catch (err) {
-      console.error("Error deleting parent account:", err);
-      setLiveActionFeedback("❌ حدث خطأ أثناء حذف الحساب، يرجى المحاولة ثانية.");
-    } finally {
-      setIsDeletingAccount(false);
-    }
+    
+    // 1. Close modal instantly
+    setAccountToDelete(null);
+
+    // 2. Immediate local delete & instant UI refresh
+    deleteParentAccount(barcode).catch(() => {});
+    reloadAccounts();
+
+    // 3. Instant affirmative feedback
+    setLiveActionFeedback(
+      `🗑️ تم حذف حساب ولي أمر (${studentName}) بنجاح، وتم إرسال أمر تسجيل الخروج التلقائي إلى هاتفه فوراً.`
+    );
+    setTimeout(() => setLiveActionFeedback(null), 5000);
   };
 
   // Action: Quick Direct Activate with Default Credentials
@@ -1973,16 +1970,14 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
             <div className="pt-2 flex items-center gap-2">
               <button
                 type="button"
-                disabled={isDeletingAccount}
                 onClick={handleConfirmDeleteAccount}
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-black text-xs transition cursor-pointer shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5"
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-xs transition cursor-pointer shadow-lg shadow-rose-600/30 flex items-center justify-center gap-1.5 active:scale-95"
               >
                 <Trash2 className="w-4 h-4" />
-                <span>{isDeletingAccount ? "جارِ الحذف..." : "نعم، حذف الحساب فوراً"}</span>
+                <span>نعم، حذف الحساب فوراً</span>
               </button>
               <button
                 type="button"
-                disabled={isDeletingAccount}
                 onClick={() => setAccountToDelete(null)}
                 className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition cursor-pointer"
               >

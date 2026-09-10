@@ -18,6 +18,7 @@ import {
   HelpCircle,
   QrCode,
   BellRing,
+  Smartphone,
 } from "lucide-react";
 
 interface PortalAuthScreenProps {
@@ -63,9 +64,8 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
       const res = await authenticatePortalLogin(loginBarcode, loginPassword, students);
       if (res.success && res.role) {
         setSuccessMsg(res.message);
-        setTimeout(() => {
-          onLoginSuccess(res.role!, res.account, loginBarcode.trim());
-        }, 500);
+        // Instant instantaneous transition
+        onLoginSuccess(res.role, res.account, loginBarcode.trim());
       } else {
         setErrorMsg(res.message);
       }
@@ -98,9 +98,8 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
       const res = await registerParentAccount(regBarcode, regPhone, regPassword, students);
       if (res.success && res.account) {
         setSuccessMsg(res.message);
-        setTimeout(() => {
-          onLoginSuccess("parent", res.account, res.account!.studentBarcode);
-        }, 800);
+        // Instant instantaneous transition
+        onLoginSuccess("parent", res.account, res.account.studentBarcode);
       } else {
         setErrorMsg(res.message);
       }
@@ -386,6 +385,20 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
               </button>
             </form>
           )}
+
+          {/* Quick Install Banner (Mobile & Cross-Browser) */}
+          <div className="pt-3 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-2xl bg-amber-500/5 border border-amber-500/20">
+            <div className="flex items-center gap-2.5 text-right w-full sm:w-auto">
+              <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                <Smartphone className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-white">تثبيت المنظومة على هاتفك (PWA)</p>
+                <p className="text-[10px] text-slate-400">يدعم كافة المتصفحات، وتيليجرام، وآيفون وأندرويد</p>
+              </div>
+            </div>
+            <PWAInstallButton variant="compact" />
+          </div>
 
           {/* Quick Help Box */}
           <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-400 text-center space-y-1">

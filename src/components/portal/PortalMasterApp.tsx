@@ -51,7 +51,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
   }, []);
 
   // Live remote logout watcher:
-  // If admin disables or deletes account, or removes student from system, force remote logout immediately
+  // If admin explicitly disables or revokes account, force remote logout
   useEffect(() => {
     if (session?.role !== "parent" || !session.account?.studentBarcode) {
       return;
@@ -59,14 +59,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
 
     const currentBarcode = String(session.account.studentBarcode).trim();
 
-    // 1. Check if student was completely deleted from school roster
-    if (students.length > 0 && !students.some((s) => String(s.barcode).trim() === currentBarcode)) {
-      setRevocationNotice("تم حذف الطالب من منظومة المركز، وتم تسجيل الخروج تلقائياً.");
-      handleLogout(true);
-      return;
-    }
-
-    // 2. Realtime listener across Firestore, BroadcastChannel, and storage events
+    // Realtime listener across Firestore, BroadcastChannel, and storage events
     const unsubscribe = subscribeToParentAccountLiveStatus(currentBarcode, (reason) => {
       setRevocationNotice(reason);
       handleLogout(true);
@@ -75,7 +68,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     return () => {
       unsubscribe();
     };
-  }, [session, students, handleLogout]);
+  }, [session, handleLogout]);
 
   // Handle successful login from AuthScreen
   const handleLoginSuccess = (

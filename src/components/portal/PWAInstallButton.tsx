@@ -1,47 +1,146 @@
 import React, { useState } from "react";
 import { usePWAInstall } from "../../hooks/usePWAInstall";
-import { Download, Smartphone, Share, PlusSquare, Check, X, Sparkles } from "lucide-react";
+import {
+  Download,
+  Smartphone,
+  Share,
+  PlusSquare,
+  Check,
+  X,
+  ExternalLink,
+  Copy,
+  Globe,
+  Sparkles,
+  Info,
+} from "lucide-react";
 
 interface PWAInstallButtonProps {
   className?: string;
   variant?: "primary" | "compact" | "badge";
+  showAlways?: boolean;
 }
 
 export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   className = "",
   variant = "primary",
 }) => {
-  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-  const [showIOSGuide, setShowIOSGuide] = useState(false);
-  const [showDesktopGuide, setShowDesktopGuide] = useState(false);
-  const [installedSuccess, setInstalledSuccess] = useState(false);
+  const {
+    isInstallable,
+    isInstalled,
+    isIOS,
+    isAndroid,
+    isInAppBrowser,
+    isTelegram,
+    browserType,
+    install,
+    openInExternalBrowser,
+    copyAppUrl,
+  } = usePWAInstall();
 
-  // If already running as installed standalone PWA, hide the button
-  if (isInstalled) {
-    return (
-      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-tajawal">
-        <Check className="w-3.5 h-3.5" />
-        <span>التطبيق مثبت</span>
-      </div>
-    );
-  }
+  const [activeModal, setActiveModal] = useState<
+    "inapp" | "ios" | "firefox" | "desktop" | "already-installed" | null
+  >(null);
+  const [copied, setCopied] = useState(false);
+  const [installSuccess, setInstallSuccess] = useState(false);
 
-  const handleInstallClick = async () => {
-    if (isIOS) {
-      setShowIOSGuide(true);
+  const handleCopy = async () => {
+    const ok = await copyAppUrl();
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    }
+  };
+
+  const handleInstallClick = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // If already installed, show confirmation modal
+    if (isInstalled) {
+      setActiveModal("already-installed");
       return;
     }
 
-    if (isInstallable) {
-      const success = await install();
-      if (success) {
-        setInstalledSuccess(true);
-        setTimeout(() => setInstalledSuccess(false), 4000);
-      }
-    } else {
-      setShowDesktopGuide(true);
+    // 1. If inside Telegram or any in-app webview
+    if (isInAppBrowser || isTelegram) {
+      setActiveModal("inapp");
+      return;
     }
+
+    // 2. Native install prompt available (Chrome, Edge, Samsung Internet)
+    if (isInstallable) {
+      try {
+        const accepted = await install();
+        if (accepted) {
+          setInstallSuccess(true);
+          setTimeout(() => setInstallSuccess(false), 4000);
+          return;
+        }
+      } catch (err) {
+        console.warn("Prompt rejected or failed:", err);
+      }
+    }
+
+    // 3. iOS Safari
+    if (isIOS) {
+      setActiveModal("ios");
+      return;
+    }
+
+    // 4. Firefox
+    if (browserType === "firefox") {
+      setActiveModal("firefox");
+      return;
+    }
+
+    // 5. Desktop or other browsers where prompt hasn't triggered yet
+    setActiveModal("desktop");
   };
+
+  // If already installed, show a neat badge that remains clickable for info
+  if (isInstalled) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setActiveModal("already-installed")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-tajawal font-medium hover:bg-emerald-500/25 transition cursor-pointer ${className}`}
+          title="التطبيق مثبت ويعمل كبرنامج أصلي على جهازك"
+        >
+          <Check className="w-3.5 h-3.5 text-emerald-400" />
+          <span>التطبيق مثبت ✓</span>
+        </button>
+
+        {activeModal === "already-installed" && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm animate-fadeIn">
+            <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-emerald-500/40 p-6 shadow-2xl text-right">
+              <button
+                onClick={() => setActiveModal(null)}
+                className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-4">
+                <Check className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-bold text-white font-fancy mb-2">
+                التطبيق مثبت بنجاح على جهازك
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed font-tajawal mb-5">
+                المنظومة تعمل بالفعل كتطبيق أصلي سريع (PWA) مع ميزة العمل بدون إنترنت وتلقي الإشعارات اللحظية. يمكنك فتحها مباشرة من شاشة جهازك الرئيسية.
+              </p>
+              <button
+                onClick={() => setActiveModal(null)}
+                className="w-full py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition shadow-lg"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <>
@@ -63,23 +162,128 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
           <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-950"></span>
         </span>
         <Download className="w-4 h-4 transition-transform group-hover:-translate-y-0.5" />
-        <span>تثبيت التطبيق (PWA)</span>
+        <span>{installSuccess ? "تم التثبيت بنجاح!" : "تثبيت التطبيق (PWA)"}</span>
       </button>
 
-      {/* iOS Installation Guide Modal */}
-      {showIOSGuide && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-slate-900 to-slate-950 border border-amber-500/30 p-6 shadow-2xl text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
+      {/* 1. In-App Browser / Telegram Modal */}
+      {activeModal === "inapp" && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border border-amber-500/40 p-6 shadow-2xl text-right max-h-[92vh] overflow-y-auto custom-scrollbar my-auto">
             <button
-              onClick={() => setShowIOSGuide(false)}
-              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              onClick={() => setActiveModal(null)}
+              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
 
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
-                <Smartphone className="w-5 h-5" />
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                <Globe className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-fancy">
+                  {isTelegram
+                    ? "تثبيت التطبيق من داخل تليجرام"
+                    : "فتح المنظومة في المتصفح الرئيسي"}
+                </h3>
+                <p className="text-xs text-amber-400 font-tajawal">
+                  خطوة واحدة بسيطة لتثبيت المنظومة كتطبيق أصلي
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 mb-4 text-xs text-amber-200/90 leading-relaxed font-tajawal">
+              متصفحات تطبيقات التواصل (مثل <strong>تليجرام وواتساب</strong>) تمنع تثبيت التطبيقات مباشرة داخلها للحماية. للتثبيت على هاتفك فوراً اتبع الخيارات التالية:
+            </div>
+
+            {/* Quick Action Buttons */}
+            <div className="space-y-2.5 mb-5">
+              <button
+                type="button"
+                onClick={openInExternalBrowser}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition cursor-pointer"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>
+                  {isAndroid
+                    ? "فتح الرابط في متصفح Chrome الآن"
+                    : "فتح الرابط في متصفح سفاري / الهاتف"}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs border border-slate-700 transition cursor-pointer"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-4 h-4 text-emerald-400" />
+                    <span className="text-emerald-400 font-bold">تم نسخ الرابط! افتح كروم والصقه</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4 text-slate-300" />
+                    <span>نسخ رابط المنظومة لفتحه في المتصفح</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Step-by-step visual guidance */}
+            <div className="space-y-2.5 text-xs text-slate-300 font-tajawal">
+              <p className="font-bold text-white text-xs mb-1">
+                أو التثبيت اليدوي من شاشة تليجرام الحالية:
+              </p>
+
+              <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <div className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 font-bold text-[11px]">
+                  1
+                </div>
+                <span>اضغط على النقاط الثلاث <strong>(⋮)</strong> أو زر المشاركة في الزاوية العلوية لشاشة تليجرام.</span>
+              </div>
+
+              <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <div className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 font-bold text-[11px]">
+                  2
+                </div>
+                <span>
+                  اختر <strong>"فتح في المتصفح"</strong> (أو <strong>Open in Chrome / Safari</strong>).
+                </span>
+              </div>
+
+              <div className="flex items-start gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 font-bold text-[11px]">
+                  3
+                </div>
+                <span>فور الفتح في المتصفح، اضغط زر <strong>"تثبيت التطبيق"</strong> وسيتم تثبيته فوراً على شاشة جهازك!</span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setActiveModal(null)}
+              className="mt-5 w-full py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition"
+            >
+              إغلاق النافذة
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 2. iOS Safari Installation Guide Modal */}
+      {activeModal === "ios" && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-amber-500/40 p-6 shadow-2xl text-right max-h-[92vh] overflow-y-auto custom-scrollbar my-auto">
+            <button
+              onClick={() => setActiveModal(null)}
+              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                <Smartphone className="w-6 h-6" />
               </div>
               <div>
                 <h3 className="text-base font-bold text-white font-fancy">
@@ -91,31 +295,37 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
               </div>
             </div>
 
-            <div className="space-y-3.5 my-5 text-xs text-slate-300 font-tajawal">
+            <div className="space-y-3 my-5 text-xs text-slate-300 font-tajawal">
               <div className="flex items-center gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
                 <div className="w-8 h-8 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center shrink-0">
                   <Share className="w-4 h-4" />
                 </div>
-                <span>1. اضغط على زر <strong>المشاركة (Share)</strong> في شريط متصفح سفاري بالأسفل.</span>
+                <span>
+                  1. اضغط على زر <strong>المشاركة (Share)</strong> في شريط متصفح سفاري بالأسفل.
+                </span>
               </div>
 
               <div className="flex items-center gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
                 <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
                   <PlusSquare className="w-4 h-4" />
                 </div>
-                <span>2. مرر للأسفل واختر <strong>إضافة إلى الصفحة الرئيسية (Add to Home Screen)</strong>.</span>
+                <span>
+                  2. مرر للأسفل واختر <strong>إضافة إلى الصفحة الرئيسية (Add to Home Screen)</strong>.
+                </span>
               </div>
 
               <div className="flex items-center gap-3 p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
                 <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
                   <Check className="w-4 h-4" />
                 </div>
-                <span>3. اضغط على <strong>إضافة (Add)</strong> بالأعلى لتجد التطبيق على شاشتك الرئيسية فوراً.</span>
+                <span>
+                  3. اضغط على <strong>إضافة (Add)</strong> بالأعلى لتجد أيقونة التطبيق على شاشة هاتفك فوراً.
+                </span>
               </div>
             </div>
 
             <button
-              onClick={() => setShowIOSGuide(false)}
+              onClick={() => setActiveModal(null)}
               className="w-full py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-lg cursor-pointer"
             >
               تم، فهمت الخطوات
@@ -124,38 +334,106 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
         </div>
       )}
 
-      {/* Desktop / Manual Guide Modal */}
-      {showDesktopGuide && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
-          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/30 p-6 shadow-2xl text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
+      {/* 3. Firefox Guide Modal */}
+      {activeModal === "firefox" && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-amber-500/40 p-6 shadow-2xl text-right max-h-[92vh] overflow-y-auto custom-scrollbar my-auto">
             <button
-              onClick={() => setShowDesktopGuide(false)}
-              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              onClick={() => setActiveModal(null)}
+              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
 
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-                <Download className="w-5 h-5" />
+              <div className="w-12 h-12 rounded-2xl bg-orange-500/20 text-orange-400 flex items-center justify-center shrink-0">
+                <Download className="w-6 h-6" />
               </div>
               <div>
                 <h3 className="text-base font-bold text-white font-fancy">
-                  تثبيت التطبيق على جهازك
+                  تثبيت التطبيق على متصفح فايرفوكس
+                </h3>
+                <p className="text-xs text-slate-400 font-tajawal">Firefox Browser</p>
+              </div>
+            </div>
+
+            <div className="space-y-3 my-4 text-xs text-slate-300 font-tajawal">
+              <div className="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                1. اضغط على زر القائمة <strong>(⋮)</strong> بجوار شريط العنوان.
+              </div>
+              <div className="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                2. اختر <strong>تثبيت (Install)</strong> أو <strong>إضافة إلى الشاشة الرئيسية</strong>.
+              </div>
+              <div className="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                3. ستظهر أيقونة المنظومة كتطبيق مستقل على جهازك.
+              </div>
+            </div>
+
+            <button
+              onClick={() => setActiveModal(null)}
+              className="w-full py-2.5 rounded-2xl bg-orange-500 hover:bg-orange-400 text-slate-950 font-bold text-xs transition shadow-lg cursor-pointer"
+            >
+              فهمت الخطوات
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Desktop / Universal Browser Guide Modal */}
+      {activeModal === "desktop" && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-3xl bg-slate-900 border border-indigo-500/40 p-6 shadow-2xl text-right max-h-[92vh] overflow-y-auto custom-scrollbar my-auto">
+            <button
+              onClick={() => setActiveModal(null)}
+              className="absolute top-4 left-4 p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0">
+                <Download className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-fancy">
+                  تثبيت المنظومة كتطبيق على جهازك
                 </h3>
                 <p className="text-xs text-slate-400 font-tajawal">
-                  من متصفح كروم أو إيدج أو الهاتف
+                  متصفح كروم / إيدج / الهاتف
                 </p>
               </div>
             </div>
 
-            <p className="text-xs text-slate-300 leading-relaxed font-tajawal mb-4">
-              يمكنك تثبيت المنظومة كتطبيق أصلي بالضغط على أيقونة <strong>التثبيت (Install)</strong> الموجودة في شريط العنوان بالمتصفح بجوار الرابط، أو عبر القائمة الرئيسية (⋮) ثم اختيار <strong>تثبيت التطبيق</strong>.
-            </p>
+            <div className="space-y-3 my-4 text-xs text-slate-300 font-tajawal">
+              <div className="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50 leading-relaxed">
+                اضغط على أيقونة <strong>التثبيت (⊕ Install)</strong> الموجودة مباشرة في نهاية شريط العنوان بالمتصفح بجوار الرابط.
+              </div>
+              <div className="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/50 leading-relaxed">
+                أو من قائمة المتصفح <strong>(⋮)</strong> اختر <strong>"تثبيت التطبيق" (Install app)</strong>.
+              </div>
+            </div>
 
             <button
-              onClick={() => setShowDesktopGuide(false)}
-              className="w-full py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition shadow-lg cursor-pointer font-tajawal"
+              type="button"
+              onClick={handleCopy}
+              className="w-full mb-3 flex items-center justify-center gap-2 py-2.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white font-medium text-xs border border-slate-700 transition cursor-pointer"
+            >
+              {copied ? (
+                <>
+                  <Check className="w-4 h-4 text-emerald-400" />
+                  <span className="text-emerald-400 font-bold">تم نسخ الرابط!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4 text-slate-300" />
+                  <span>نسخ رابط المنظومة</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={() => setActiveModal(null)}
+              className="w-full py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition shadow-lg cursor-pointer"
             >
               حسناً، فهمت
             </button>

@@ -1,6 +1,7 @@
 import React from "react";
 import { UserAccount } from "../types";
 import { TEACHER_NAME, PREDEFINED_SESSION_SLOTS } from "../utils/helpers";
+import { PWAInstallButton } from "./portal/PWAInstallButton";
 import {
   Shield,
   User,
@@ -273,6 +274,9 @@ export const Navbar: React.FC<NavbarProps> = React.memo(({
             </span>
           </button>
         </div>
+
+        {/* PWA Install Button (Works on all browsers, mobiles & desktop) */}
+        <PWAInstallButton variant="compact" />
 
         {/* Voice Announcement Audio Toggle */}
         {onToggleVoice && (

@@ -29,6 +29,7 @@ import {
   resolveEffectiveGroupForDate,
 } from "../../utils/helpers";
 import { printElement } from "../../utils/print";
+import { loadLocalData } from "../../utils/storage";
 import { PWAInstallButton } from "./PWAInstallButton";
 import { NotificationPermissionModal } from "./NotificationPermissionModal";
 import {
@@ -184,11 +185,35 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   // Current active child student object
   const activeStudent = useMemo(() => {
+    const target = String(selectedStudentBarcode || account.studentBarcode).trim();
+    let s =
+      students.find((item) => String(item.barcode).trim() === target) ||
+      students.find((item) => String(item.barcode).trim() === String(account.studentBarcode).trim());
+
+    if (!s) {
+      const local = loadLocalData();
+      if (local?.students) {
+        s =
+          local.students.find((item) => String(item.barcode).trim() === target) ||
+          local.students.find((item) => String(item.barcode).trim() === String(account.studentBarcode).trim());
+      }
+    }
+
+    if (!s && !isNaN(Number(target))) {
+      const num = Number(target);
+      s = students.find((item) => Number(item.barcode) === num);
+      if (!s) {
+        const local = loadLocalData();
+        if (local?.students) {
+          s = local.students.find((item) => Number(item.barcode) === num);
+        }
+      }
+    }
+
     return (
-      students.find((s) => s.barcode === selectedStudentBarcode) ||
-      students.find((s) => s.barcode === account.studentBarcode) || {
-        barcode: selectedStudentBarcode,
-        name: "طالب مسجل",
+      s || {
+        barcode: target,
+        name: account.studentName || "طالب مسجل",
         phone: "",
         parentPhone: account.parentPhone,
         groupGrade: "الصف الرابع الابتدائي" as any,

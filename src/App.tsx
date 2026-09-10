@@ -11,6 +11,7 @@ import {
 } from "./types";
 import {
   loadInitialData,
+  loadLocalData,
   saveStudentsData,
   saveAttendanceTodayData,
   saveAttendanceAndStudentsBatch,
@@ -199,18 +200,51 @@ export default function App() {
     }
   }, [theme]);
 
-  // Core Datasets with guaranteed initial default arrays/objects
-  const [students, setStudents] = useState<Student[]>([]);
-  const [attendanceToday, setAttendanceToday] = useState<Record<string, string>>({});
-  const [attendanceHistory, setAttendanceHistory] = useState<Record<string, Record<string, string>>>({});
-  const [scanLogOrder, setScanLogOrder] = useState<string[]>([]);
-  const [scanLogTimes, setScanLogTimes] = useState<Record<string, string>>({});
-  const [payments, setPayments] = useState<Record<string, Record<string, PaymentRecord>>>({});
-  const [groupPrices, setGroupPrices] = useState<Record<GradeName, number>>({} as Record<GradeName, number>);
-  const [usersList, setUsersList] = useState<UserAccount[]>([]);
-  const [platformMessages, setPlatformMessages] = useState<PlatformMessage[]>([]);
-  const [pendingWhatsAppMessages, setPendingWhatsAppMessages] = useState<PendingWhatsAppMessage[]>([]);
-  const [gradeWhatsAppLinks, setGradeWhatsAppLinks] = useState<Record<string, string>>({});
+  // Core Datasets with guaranteed initial default arrays/objects loaded synchronously from local disk
+  const [students, setStudents] = useState<Student[]>(() => {
+    const d = loadLocalData();
+    return Array.isArray(d?.students) && d.students.length > 0 ? d.students : [];
+  });
+  const [attendanceToday, setAttendanceToday] = useState<Record<string, string>>(() => {
+    const d = loadLocalData();
+    return d?.attendanceToday || {};
+  });
+  const [attendanceHistory, setAttendanceHistory] = useState<Record<string, Record<string, string>>>(() => {
+    const d = loadLocalData();
+    return d?.attendanceHistory || {};
+  });
+  const [scanLogOrder, setScanLogOrder] = useState<string[]>(() => {
+    const d = loadLocalData();
+    return Array.isArray(d?.scanLogOrder) ? d.scanLogOrder : [];
+  });
+  const [scanLogTimes, setScanLogTimes] = useState<Record<string, string>>(() => {
+    const d = loadLocalData();
+    return d?.scanLogTimes || {};
+  });
+  const [payments, setPayments] = useState<Record<string, Record<string, PaymentRecord>>>(() => {
+    const d = loadLocalData();
+    return d?.payments || {};
+  });
+  const [groupPrices, setGroupPrices] = useState<Record<GradeName, number>>(() => {
+    const d = loadLocalData();
+    return d?.groupPrices || ({} as Record<GradeName, number>);
+  });
+  const [usersList, setUsersList] = useState<UserAccount[]>(() => {
+    const d = loadLocalData();
+    return Array.isArray(d?.usersList) ? d.usersList : [];
+  });
+  const [platformMessages, setPlatformMessages] = useState<PlatformMessage[]>(() => {
+    const d = loadLocalData();
+    return Array.isArray(d?.platformMessages) ? d.platformMessages : [];
+  });
+  const [pendingWhatsAppMessages, setPendingWhatsAppMessages] = useState<PendingWhatsAppMessage[]>(() => {
+    const d = loadLocalData();
+    return Array.isArray(d?.pendingWhatsAppMessages) ? d.pendingWhatsAppMessages : [];
+  });
+  const [gradeWhatsAppLinks, setGradeWhatsAppLinks] = useState<Record<string, string>>(() => {
+    const d = loadLocalData();
+    return d?.gradeWhatsAppLinks || {};
+  });
   const [isWhatsAppOutboxOpen, setIsWhatsAppOutboxOpen] = useState<boolean>(false);
 
   // Print PDF Modal State
