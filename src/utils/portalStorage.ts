@@ -10,6 +10,7 @@ import {
 } from "../types/portal";
 import { playPortalAudioChime } from "./portalNotifications";
 import { loadLocalData, isFirestoreQuotaError } from "./storage";
+import { savePortalAccountsToSupabase, fetchPortalAccountsFromSupabase } from "./supabaseClient";
 
 // Storage Keys
 const LS_PARENT_ACCOUNTS = "eman_parent_accounts";
@@ -170,7 +171,9 @@ export function subscribeToAdminActivityLogs(
           }
         },
         (err) => {
-          console.warn("Audit log subscription notice:", err);
+          if (!isFirestoreQuotaError(err)) {
+            console.warn("Audit log subscription notice:", err);
+          }
         }
       );
     })
@@ -262,8 +265,19 @@ export async function syncParentAccountsFromCloud(force: boolean = false): Promi
           }
         }
       } catch {
-        // Fall back to Firestore below
+        // Fall back to Supabase / Firestore below
       }
+
+      // 2. Fast Supabase Cloud Database (Zero Quota Limits)
+      try {
+        const sbAccounts = await fetchPortalAccountsFromSupabase();
+        if (sbAccounts && typeof sbAccounts === "object" && Object.keys(sbAccounts).length > 0) {
+          const merged = { ...local, ...sbAccounts };
+          saveLocalParentAccounts(merged);
+          lastAccountsSyncTime = Date.now();
+          return merged;
+        }
+      } catch {}
 
       await ensureFirebaseAuth();
       if (db) {
@@ -398,6 +412,13 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
       body: JSON.stringify(account),
     }).catch(() => {});
   }
+
+  // Fast Supabase Cloud Database Persistence (Zero Quota Limits)
+  try {
+    const allAccs = getLocalParentAccounts();
+    allAccs[account.studentBarcode] = account;
+    savePortalAccountsToSupabase(allAccs).catch(() => {});
+  } catch {}
 
   // Reliable cloud persistence tied to Firestore (Executed in parallel without blocking)
   ensureFirebaseAuth()
@@ -707,7 +728,9 @@ export function subscribeToAllParentAccounts(
           }
         );
       } catch (err) {
-        console.warn("Error subscribing to realtime cloud accounts:", err);
+        if (!isFirestoreQuotaError(err)) {
+          console.warn("Error subscribing to realtime cloud accounts:", err);
+        }
       }
     })
     .catch(() => {});
@@ -901,7 +924,9 @@ export function subscribeToParentAccountLiveStatus(
       );
     }
   } catch (e) {
-    console.warn("Notice attaching Firestore snapshot listener:", e);
+    if (!isFirestoreQuotaError(e)) {
+      console.warn("Notice attaching Firestore snapshot listener:", e);
+    }
   }
 
   // 5. Lightweight server check & heartbeat (checks server in-memory cache with 0 Firestore reads)
@@ -1682,7 +1707,9 @@ export function subscribeToThreadChat(
           }
         },
         (err) => {
-          console.warn("Firestore chat subscription error:", err);
+          if (!isFirestoreQuotaError(err)) {
+            console.warn("Firestore chat subscription error:", err);
+          }
         }
       );
     })
@@ -1760,7 +1787,9 @@ export function subscribeToAllChats(
           }
         },
         (err) => {
-          console.warn("Firestore all-chats subscription error:", err);
+          if (!isFirestoreQuotaError(err)) {
+            console.warn("Firestore all-chats subscription error:", err);
+          }
         }
       );
     })

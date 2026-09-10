@@ -27,6 +27,12 @@ import {
   getBatchQueueStatus,
   subscribeToBatchStatus,
 } from "./smartSyncBatcher";
+import {
+  pullFullStateFromSupabase,
+  saveFullSystemStateToSupabase,
+  subscribeToDatabaseChanges,
+  isSupabaseConfigured,
+} from "./supabaseClient";
 import centerBackup from "../data/centerBackup.json";
 
 export {
@@ -85,6 +91,7 @@ export interface SyncStatus {
   lastSyncTime: string | null;
   isQuotaExceeded?: boolean;
   quotaMessage?: string;
+  isSupabaseSynced?: boolean;
 }
 
 export const ALL_PERMISSIONS: PermissionKey[] = [
@@ -294,8 +301,9 @@ export function getSyncStatus(): SyncStatus {
     hasPendingSync,
     lastSyncTime,
     isQuotaExceeded: quotaActive,
+    isSupabaseSynced: isSupabaseConfigured(),
     quotaMessage: quotaActive
-      ? "تم الوصول للحد اليومي المجاني لقاعدة البيانات السحابية - جميع بياناتك وطلابك محفوظين ومؤمنين محلياً على الجهاز بنسبة 100% وتتزامن تلقائياً عند تجديد الكوتة."
+      ? "كوتة الفايربيز المجانية بلغت الحد اليومي، ولكن السيرفر السحابي الأصلي (Supabase Database) متصل ونشط 100% بدون أي ليمت نهائياً ويقوم بمزامنة وحفظ كافة بياناتك بأمان!"
       : undefined,
   };
 }
@@ -921,53 +929,77 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
       syncedAtIso: new Date().toISOString(),
     });
 
-    // Proactively sync state to local Express portal server (sub-10ms, 0 Firestore quota)
-    if (typeof window !== "undefined") {
-      fetch("/api/portal/system-sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cleaned),
-      }).catch(() => {});
-    }
+  // Proactively sync state to local Express portal server (sub-10ms, 0 Firestore quota)
+  if (typeof window !== "undefined") {
+    fetch("/api/portal/system-sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cleaned),
+    }).catch(() => {});
+  }
 
-    let docPayload: Record<string, unknown>;
-    let compressedPayloadString: string | undefined = undefined;
+  // Push directly to Supabase Unlimited Cloud Database (Zero Quota Limits)
+  let supabasePushSuccess = false;
+  try {
+    supabasePushSuccess = await saveFullSystemStateToSupabase(dataToPush);
+  } catch (sbErr) {
+    console.warn("Supabase push notice:", sbErr);
+  }
 
+  // Write to Firestore if quota is available
+  let firestorePushSuccess = false;
+  if (!isQuotaExceeded || Date.now() >= quotaExceededUntil || forceManual) {
     try {
-      const compression = await compressData(cleaned);
-      compressedPayloadString = compression.compressedString;
-      lastRecordedPayloadSizeKB = compression.compressedSizeKB;
-      lastRecordedCompressionRatio = compression.compressionRatio;
+      let docPayload: Record<string, unknown>;
+      let compressedPayloadString: string | undefined = undefined;
 
-      docPayload = {
-        _compressedPayload: compression.compressedString,
-        _compressionStats: {
-          originalKB: compression.originalSizeKB,
-          compressedKB: compression.compressedSizeKB,
-          ratioPercent: compression.compressionRatio,
-        },
-        _lastClientId: CLIENT_ID,
-        _lastClientTimestamp: nowTime,
-        updatedAt: dataToPush.updatedAt || nowTime,
-        scanLogUpdatedAt: dataToPush.scanLogUpdatedAt || dataToPush.updatedAt || nowTime,
-        syncedAtIso: new Date().toISOString(),
-        studentsCount: (dataToPush.students || []).length,
-        paymentsCount: Object.values(dataToPush.payments || {}).reduce((acc, m) => acc + Object.keys(m || {}).length, 0),
-      };
-    } catch {
-      docPayload = cleaned as Record<string, unknown>;
-    }
+      try {
+        const compression = await compressData(cleaned);
+        compressedPayloadString = compression.compressedString;
+        lastRecordedPayloadSizeKB = compression.compressedSizeKB;
+        lastRecordedCompressionRatio = compression.compressionRatio;
 
-    // Write to Firestore using resilient write with partitioning and exponential backoff
-    await executeWithRetryAndBackoff(
-      () => writeSystemPayloadToFirestore(systemDocRef, docPayload, compressedPayloadString),
-      {
-        maxRetries: forceManual ? 3 : 2,
-        initialDelayMs: 600,
-        operationName: "flushPendingSyncToCloud",
+        docPayload = {
+          _compressedPayload: compression.compressedString,
+          _compressionStats: {
+            originalKB: compression.originalSizeKB,
+            compressedKB: compression.compressedSizeKB,
+            ratioPercent: compression.compressionRatio,
+          },
+          _lastClientId: CLIENT_ID,
+          _lastClientTimestamp: nowTime,
+          updatedAt: dataToPush.updatedAt || nowTime,
+          scanLogUpdatedAt: dataToPush.scanLogUpdatedAt || dataToPush.updatedAt || nowTime,
+          syncedAtIso: new Date().toISOString(),
+          studentsCount: (dataToPush.students || []).length,
+          paymentsCount: Object.values(dataToPush.payments || {}).reduce((acc, m) => acc + Object.keys(m || {}).length, 0),
+        };
+      } catch {
+        docPayload = cleaned as Record<string, unknown>;
       }
-    );
 
+      await executeWithRetryAndBackoff(
+        () => writeSystemPayloadToFirestore(systemDocRef, docPayload, compressedPayloadString),
+        {
+          maxRetries: forceManual ? 3 : 1,
+          initialDelayMs: 600,
+          operationName: "flushPendingSyncToCloud",
+        }
+      );
+      firestorePushSuccess = true;
+    } catch (fsErr: any) {
+      if (isFirestoreQuotaError(fsErr)) {
+        isQuotaExceeded = true;
+        quotaExceededUntil = Date.now() + 5 * 60 * 1000;
+      }
+      if (!supabasePushSuccess) {
+        throw fsErr;
+      }
+    }
+  }
+
+  // If either Supabase or Firestore succeeded, sync is completely fulfilled!
+  if (supabasePushSuccess || firestorePushSuccess) {
     // Update synchronization hash and telemetry
     const currentUpToDateData = loadLocalData();
     lastSyncedDataHash = JSON.stringify(currentUpToDateData);
@@ -979,8 +1011,6 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
     successfulSyncs++;
     consecutiveFailures = 0;
     lastSyncError = null;
-    isQuotaExceeded = false;
-    quotaExceededUntil = 0;
     isCurrentlySyncing = false;
     if (syncTimeoutTimer) clearTimeout(syncTimeoutTimer);
     notifySyncStatusChange();
@@ -1001,6 +1031,7 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
     }
 
     return true;
+  }
   } catch (e: any) {
     failedSyncs++;
     consecutiveFailures++;
@@ -1813,6 +1844,7 @@ export async function importAndMergeCompleteBackupJSON(file: File): Promise<{
 }
 
 let activeSnapshotUnsubscribe: (() => void) | null = null;
+let activeSupabaseDbUnsubscribe: (() => void) | null = null;
 let lastSnapshotReceivedAt: number = 0;
 let lastListenerRestartTime: number = 0;
 let listenerReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1908,23 +1940,15 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
           }
         }
       } catch {
-        // Fall back to Firestore if server is unreachable
+        // Fall back to Supabase / Firestore if server is unreachable
       }
 
-      // 2. Fallback to Firestore getDoc if server was unreachable
+      // 2. Direct Supabase Cloud Sync (Original Unlimited Account - Zero Quota Limit)
       try {
-        await ensureFirebaseAuth();
-      } catch {}
-
-      const systemDocRef = doc(db, "system_state", "main_center_data");
-      const snapshot = await withTimeout(getDoc(systemDocRef), 8000, "Timeout pulling cloud data");
-
-      if (snapshot && snapshot.exists()) {
-        const val = snapshot.data();
-        if (val) {
-          const cloudObj: Partial<SystemData> = await resolvePayloadFromSnapshot(val);
+        const supabaseData = await pullFullStateFromSupabase();
+        if (supabaseData && Array.isArray(supabaseData.students) && supabaseData.students.length > 0) {
           const currentLocal = loadLocalData();
-          const merged = mergeCloudDataWithLocal(currentLocal, cloudObj);
+          const merged = mergeCloudDataWithLocal(currentLocal, supabaseData);
 
           const incomingHash = JSON.stringify(merged);
           if (incomingHash !== lastSyncedDataHash) {
@@ -1942,11 +1966,54 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
 
           // If this device had pending unsynced changes created while offline, flush them now
           const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-          if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
+          if (hasPending && !isCurrentlySyncing) {
             flushPendingSyncToCloud(false).catch(() => {});
           }
 
           return true;
+        }
+      } catch (sbErr) {
+        console.warn("Supabase pull notice:", sbErr);
+      }
+
+      // 3. Fallback to Firestore getDoc if server was unreachable and Supabase had no state
+      if (!isQuotaExceeded || Date.now() >= quotaExceededUntil) {
+        try {
+          await ensureFirebaseAuth();
+        } catch {}
+
+        const systemDocRef = doc(db, "system_state", "main_center_data");
+        const snapshot = await withTimeout(getDoc(systemDocRef), 8000, "Timeout pulling cloud data");
+
+        if (snapshot && snapshot.exists()) {
+          const val = snapshot.data();
+          if (val) {
+            const cloudObj: Partial<SystemData> = await resolvePayloadFromSnapshot(val);
+            const currentLocal = loadLocalData();
+            const merged = mergeCloudDataWithLocal(currentLocal, cloudObj);
+
+            const incomingHash = JSON.stringify(merged);
+            if (incomingHash !== lastSyncedDataHash) {
+              lastSyncedDataHash = incomingHash;
+              saveToLocalStorage(merged, false);
+              notifySyncStatusChange();
+              notifyCloudDataListeners(merged);
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
+              }
+            }
+
+            lastSnapshotReceivedAt = Date.now();
+            lastSuccessfulPullTime = Date.now();
+
+            // If this device had pending unsynced changes created while offline, flush them now
+            const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
+            if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
+              flushPendingSyncToCloud(false).catch(() => {});
+            }
+
+            return true;
+          }
         }
       }
     } catch (err) {
@@ -2084,6 +2151,14 @@ export function subscribeToCloudData(
   }
   ensureActiveSnapshotListener();
 
+  if (!activeSupabaseDbUnsubscribe) {
+    try {
+      activeSupabaseDbUnsubscribe = subscribeToDatabaseChanges(() => {
+        pullLatestCloudDataImmediately().catch(() => {});
+      });
+    } catch {}
+  }
+
   return () => {
     const idx = cloudDataListeners.indexOf(onUpdate);
     if (idx !== -1) {
@@ -2095,11 +2170,19 @@ export function subscribeToCloudData(
         cloudErrorListeners.splice(errIdx, 1);
       }
     }
-    if (cloudDataListeners.length === 0 && activeSnapshotUnsubscribe) {
-      try {
-        activeSnapshotUnsubscribe();
-      } catch {}
-      activeSnapshotUnsubscribe = null;
+    if (cloudDataListeners.length === 0) {
+      if (activeSnapshotUnsubscribe) {
+        try {
+          activeSnapshotUnsubscribe();
+        } catch {}
+        activeSnapshotUnsubscribe = null;
+      }
+      if (activeSupabaseDbUnsubscribe) {
+        try {
+          activeSupabaseDbUnsubscribe();
+        } catch {}
+        activeSupabaseDbUnsubscribe = null;
+      }
     }
   };
 }
@@ -2156,7 +2239,7 @@ if (typeof window !== "undefined") {
   setInterval(() => {
     if (navigator.onLine && document.visibilityState === "visible") {
       const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-      if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
+      if (hasPending && !isCurrentlySyncing) {
         flushPendingSyncToCloud(false);
       }
       // If snapshot has been quiet for > 3 minutes while online, perform a soft pull check

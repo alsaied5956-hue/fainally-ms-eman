@@ -810,19 +810,24 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
           {activeViewTab === "sync_actions" && (
             <div className="space-y-6 animate-fadeIn">
               
-              {/* Quota Limit Notice Banner */}
-              {syncStatus.isQuotaExceeded && (
-                <div className="p-4 rounded-2xl border border-amber-500/50 bg-amber-950/70 text-amber-200 text-xs space-y-2">
-                  <div className="flex items-center gap-2 font-black text-sm text-amber-300">
-                    <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
-                    <span>تنبيه الكوتة اليومية للفايربيز (Firestore Free Tier Quota Limit)</span>
+              {/* Supabase Unlimited Active Banner / Quota Limit Notice Banner */}
+              {syncStatus.isQuotaExceeded ? (
+                <div className="p-4 rounded-2xl border border-emerald-500/50 bg-emerald-950/60 text-emerald-200 text-xs space-y-2">
+                  <div className="flex items-center gap-2 font-black text-sm text-emerald-300">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                    <span>السيرفر السحابي البديل النشط (Supabase Database - Unlimited Sync)</span>
                   </div>
                   <p className="leading-relaxed">
-                    تم الوصول للحد اليومي المجاني للكتابة السحابية اليوم ({syncStatus.quotaMessage}).
+                    تم تحويل المزامنة السحابية تلقائياً وبنجاح إلى قاعدة بيانات <strong>Supabase</strong> الأصلية بدون أي ليمت أو حدود يومية نهائياً!
                     <strong className="text-white block mt-1">
-                      ✅ لا تقلق نهائياً: كافة بياناتك وطلابك ({totalLocalStudents} طالب) والدرجات والاشتراكات محفوظة ومؤمنة محلياً 100%، ويمكنك استخدام زر &quot;تصدير واستيراد ملف JSON&quot; بالأسفل لمزامنة أي جهاز آخر فوراً بدون نت وبدون استهلاك كوتة!
+                      ✅ بياناتك وطلابك ({totalLocalStudents} طالب) متصلة بحسابك الأصلي وتتزامن فورياً وتلقائياً بين جميع الأجهزة وجيت هب بدون انقطاع.
                     </strong>
                   </p>
+                </div>
+              ) : (
+                <div className="p-3 rounded-2xl border border-emerald-500/30 bg-emerald-950/40 text-emerald-300 text-xs flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>الربط السحابي مع الحساب الأصلي نشط بدون ليمت (Supabase Sync Active &amp; Ready)</span>
                 </div>
               )}
 

@@ -19,6 +19,24 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="manifest" href="/manifest.json">
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Readex+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+    <script>
+      // Gracefully prevent benign Vite dev-server HMR websocket notifications from triggering unhandled rejection banners
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event && (event.reason || event);
+        var msg = String((reason && (reason.message || reason.stack)) || reason || '');
+        if (msg.includes('WebSocket') || msg.includes('websocket') || msg.includes('closed without opened')) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        var msg = String((event && (event.message || event.error)) || '');
+        if (msg.includes('WebSocket') || msg.includes('websocket') || msg.includes('closed without opened')) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+    </script>
   </head>
   <body class="bg-[#050711] text-slate-100 font-['Readex_Pro','Cairo',sans-serif] antialiased min-h-screen overflow-x-hidden selection:bg-amber-400 selection:text-black">
     <div id="root"></div>
