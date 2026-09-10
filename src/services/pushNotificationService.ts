@@ -174,7 +174,7 @@ export async function savePushSubscription(
     console.warn("Could not register push to Express backend:", err);
   }
 
-  // 2. Firestore push_subscriptions collection
+  // 2. Firestore push_subscriptions collection (secondary cloud backup)
   if (db) {
     try {
       const cleanDocId = encodeURIComponent(endpoint).slice(-80);
@@ -192,8 +192,11 @@ export async function savePushSubscription(
         },
         { merge: true }
       );
-    } catch (err) {
-      console.warn("Failed saving push subscription to Firestore:", err);
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      if (!msg.includes("quota") && !msg.includes("Quota") && !msg.includes("resource-exhausted")) {
+        console.warn("Failed saving push subscription to Firestore:", err);
+      }
     }
   }
 }

@@ -139,6 +139,61 @@ interface StoredSubscription {
 const subscriptionsCache = new Map<string, StoredSubscription>();
 const SUBS_FILE = path.join(process.cwd(), ".push_subscriptions_store.json");
 
+// ----------------------------------------------------
+// RESILIENT FIRESTORE QUOTA CIRCUIT BREAKER & ERROR HANDLER
+// ----------------------------------------------------
+let isFirestoreQuotaExceededServer = false;
+let quotaExceededResetTimeout: NodeJS.Timeout | null = null;
+let lastQuotaNoticeTime = 0;
+
+function isFirestoreQuotaExceeded(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || err);
+  const code = String(err?.code || "");
+  const status = String(err?.status || "");
+  return (
+    code === "resource-exhausted" ||
+    code.includes("resource-exhausted") ||
+    code === "429" ||
+    status === "RESOURCE_EXHAUSTED" ||
+    msg.includes("Quota limit exceeded") ||
+    msg.includes("quota metric") ||
+    msg.includes("resource-exhausted") ||
+    msg.includes("RESOURCE_EXHAUSTED") ||
+    msg.includes("Quota exceeded") ||
+    msg.includes("free quota limits") ||
+    msg.includes("Free daily read units") ||
+    msg.includes("Free daily write units")
+  );
+}
+
+function handleFirestoreQuotaWarning(source: string, err: any): boolean {
+  if (!isFirestoreQuotaExceeded(err)) {
+    return false;
+  }
+  isFirestoreQuotaExceededServer = true;
+  const now = Date.now();
+  if (now - lastQuotaNoticeTime > 15 * 60 * 1000) {
+    lastQuotaNoticeTime = now;
+    console.info(
+      `[Push/Firestore] Daily free-tier read quota limit reached (${source}). Operating smoothly in resilient offline-first mode using local persistent disk storage (.push_subscriptions_store.json) and memory cache.`
+    );
+  }
+
+  // Schedule an automatic check in 30 minutes to see if daily quota has reset
+  if (!quotaExceededResetTimeout) {
+    quotaExceededResetTimeout = setTimeout(() => {
+      quotaExceededResetTimeout = null;
+      isFirestoreQuotaExceededServer = false;
+      console.info("[Push/Firestore] Re-checking cloud Firestore sync after quota cooldown window...");
+      syncSubscriptionsFromFirestore().catch(() => {});
+      setupAutonomousBackgroundPushListeners();
+    }, 30 * 60 * 1000);
+  }
+
+  return true;
+}
+
 function normalizeId(id: string): string {
   let s = String(id || "").trim();
   if (s.startsWith("+2")) s = s.slice(2);
@@ -175,6 +230,9 @@ function persistStoredSubscriptions(): void {
 }
 
 async function syncSubscriptionsFromFirestore(): Promise<void> {
+  if (isFirestoreQuotaExceededServer) {
+    return;
+  }
   try {
     const snap = await getDocs(collection(db, "push_subscriptions"));
     let count = 0;
@@ -200,13 +258,15 @@ async function syncSubscriptionsFromFirestore(): Promise<void> {
       console.log(`[Push] Synced ${count} subscriptions from Firestore. Total active: ${subscriptionsCache.size}`);
       persistStoredSubscriptions();
     }
-  } catch (err) {
-    console.warn("[Push] Error syncing from Firestore:", err);
+  } catch (err: any) {
+    if (!handleFirestoreQuotaWarning("syncSubscriptionsFromFirestore", err)) {
+      console.warn("[Push] Error syncing from Firestore:", err.message || err);
+    }
   }
 }
 
+// Initial cold start: load from local disk immediately
 loadStoredSubscriptions();
-syncSubscriptionsFromFirestore().catch(() => {});
 
 // ----------------------------------------------------
 // API ROUTES
@@ -409,20 +469,26 @@ app.post("/api/push-subscribe", (req, res) => {
     subscriptionsCache.set(subscription.endpoint, stored);
     persistStoredSubscriptions();
 
-    // Persist to Firestore collection push_subscriptions
-    try {
-      const cleanDocId = encodeURIComponent(subscription.endpoint).slice(-80);
-      setDoc(doc(db, "push_subscriptions", cleanDocId), {
-        userId: stored.userId,
-        aliases: stored.aliases,
-        userRole: stored.userRole,
-        endpoint: stored.endpoint,
-        p256dh: stored.keys.p256dh,
-        auth: stored.keys.auth,
-        userAgent: stored.userAgent,
-        updatedAt: new Date(),
-      }, { merge: true }).catch(() => {});
-    } catch {}
+    // Persist to Firestore collection push_subscriptions (fire-and-forget, skip if quota limit reached)
+    if (!isFirestoreQuotaExceededServer) {
+      try {
+        const cleanDocId = encodeURIComponent(subscription.endpoint).slice(-80);
+        setDoc(doc(db, "push_subscriptions", cleanDocId), {
+          userId: stored.userId,
+          aliases: stored.aliases,
+          userRole: stored.userRole,
+          endpoint: stored.endpoint,
+          p256dh: stored.keys.p256dh,
+          auth: stored.keys.auth,
+          userAgent: stored.userAgent,
+          updatedAt: new Date(),
+        }, { merge: true }).catch((err) => {
+          handleFirestoreQuotaWarning("setDoc push_subscriptions", err);
+        });
+      } catch (err) {
+        handleFirestoreQuotaWarning("setDoc push_subscriptions", err);
+      }
+    }
 
     console.log(`[Push] Registered subscription for user ${cleanUserId} (aliases: ${cleanAliases.length}). Total: ${subscriptionsCache.size}`);
     return res.json({ success: true, count: subscriptionsCache.size });
@@ -681,10 +747,16 @@ async function sendWebPushToTargets(params: SendPushParams): Promise<{
   if (deadEndpoints.length > 0) {
     deadEndpoints.forEach((ep) => {
       subscriptionsCache.delete(ep);
-      try {
-        const cleanDocId = encodeURIComponent(ep).slice(-80);
-        deleteDoc(doc(db, "push_subscriptions", cleanDocId)).catch(() => {});
-      } catch {}
+      if (!isFirestoreQuotaExceededServer) {
+        try {
+          const cleanDocId = encodeURIComponent(ep).slice(-80);
+          deleteDoc(doc(db, "push_subscriptions", cleanDocId)).catch((err) => {
+            handleFirestoreQuotaWarning("deleteDoc push_subscriptions", err);
+          });
+        } catch (err) {
+          handleFirestoreQuotaWarning("deleteDoc push_subscriptions", err);
+        }
+      }
     });
     persistStoredSubscriptions();
   }
@@ -705,7 +777,7 @@ app.post("/api/send-push", async (req, res) => {
     }
 
     // Ensure subscriptions are loaded (cached in-memory, zero latency)
-    if (subscriptionsCache.size === 0) {
+    if (subscriptionsCache.size === 0 && !isFirestoreQuotaExceededServer) {
       await syncSubscriptionsFromFirestore();
     }
 
@@ -740,166 +812,226 @@ let knownPayments = new Set<string>();
 let isInitialPaymentsLoaded = false;
 let lastProcessedLiveEventTime = Date.now() - 30000;
 
+let unsubPushSubs: (() => void) | null = null;
+let unsubLiveEvents: (() => void) | null = null;
+let unsubSystemState: (() => void) | null = null;
+
+function detachAllFirestoreListeners() {
+  if (unsubPushSubs) {
+    try { unsubPushSubs(); } catch {}
+    unsubPushSubs = null;
+  }
+  if (unsubLiveEvents) {
+    try { unsubLiveEvents(); } catch {}
+    unsubLiveEvents = null;
+  }
+  if (unsubSystemState) {
+    try { unsubSystemState(); } catch {}
+    unsubSystemState = null;
+  }
+}
+
 function setupAutonomousBackgroundPushListeners() {
+  if (isFirestoreQuotaExceededServer) {
+    console.info("[Background Push] Firestore quota limit currently active; running in standalone mode using local push cache.");
+    return;
+  }
+  detachAllFirestoreListeners();
   console.log("[Background Push] Initializing 24/7 autonomous Firestore listeners...");
 
   // 1. Subscribe to push_subscriptions collection in Firestore to keep memory cache continuously updated
   try {
-    onSnapshot(collection(db, "push_subscriptions"), (snap) => {
-      snap.docChanges().forEach((change) => {
-        const data = change.doc.data();
-        if (data.endpoint && data.p256dh && data.auth) {
-          if (change.type === "added" || change.type === "modified") {
-            subscriptionsCache.set(data.endpoint, {
-              userId: String(data.userId || "guest").trim(),
-              aliases: Array.isArray(data.aliases) ? data.aliases.map(String) : [],
-              userRole: data.userRole || "parent",
-              endpoint: data.endpoint,
-              keys: {
-                p256dh: data.p256dh,
-                auth: data.auth,
-              },
-              userAgent: data.userAgent || "",
-              updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now(),
-            });
-          } else if (change.type === "removed") {
-            subscriptionsCache.delete(data.endpoint);
+    unsubPushSubs = onSnapshot(
+      collection(db, "push_subscriptions"),
+      (snap) => {
+        snap.docChanges().forEach((change) => {
+          const data = change.doc.data();
+          if (data.endpoint && data.p256dh && data.auth) {
+            if (change.type === "added" || change.type === "modified") {
+              subscriptionsCache.set(data.endpoint, {
+                userId: String(data.userId || "guest").trim(),
+                aliases: Array.isArray(data.aliases) ? data.aliases.map(String) : [],
+                userRole: data.userRole || "parent",
+                endpoint: data.endpoint,
+                keys: {
+                  p256dh: data.p256dh,
+                  auth: data.auth,
+                },
+                userAgent: data.userAgent || "",
+                updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : Date.now(),
+              });
+            } else if (change.type === "removed") {
+              subscriptionsCache.delete(data.endpoint);
+            }
           }
+        });
+        persistStoredSubscriptions();
+      },
+      (err) => {
+        if (handleFirestoreQuotaWarning("push_subscriptions listener", err)) {
+          detachAllFirestoreListeners();
+        } else {
+          console.warn("[Background Push] push_subscriptions listener notice:", err.message || err);
         }
-      });
-      persistStoredSubscriptions();
-    }, (err) => {
-      console.warn("[Background Push] push_subscriptions listener error:", err.message);
-    });
+      }
+    );
   } catch (err: any) {
-    console.warn("[Background Push] failed to listen to push_subscriptions:", err.message);
+    if (handleFirestoreQuotaWarning("push_subscriptions listener setup", err)) {
+      detachAllFirestoreListeners();
+    } else {
+      console.warn("[Background Push] failed to listen to push_subscriptions:", err.message || err);
+    }
   }
 
   // 2. Listen to live attendance events (scans from any device or external site)
   try {
-    onSnapshot(doc(db, "live_events", "today"), async (snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data();
-      const last = data?.lastEvent;
-      if (!last || !last.timestamp || last.timestamp <= lastProcessedLiveEventTime) return;
-      lastProcessedLiveEventTime = last.timestamp;
+    unsubLiveEvents = onSnapshot(
+      doc(db, "live_events", "today"),
+      async (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const last = data?.lastEvent;
+        if (!last || !last.timestamp || last.timestamp <= lastProcessedLiveEventTime) return;
+        lastProcessedLiveEventTime = last.timestamp;
 
-      const barcode = String(last.barcode || "").trim();
-      const student = cachedStudents.find((s) => String(s.barcode).trim() === barcode);
-      const studentName = last.studentName || student?.name || "الطالب";
-      const status = last.status || "حضور";
+        const barcode = String(last.barcode || "").trim();
+        const student = cachedStudents.find((s) => String(s.barcode).trim() === barcode);
+        const studentName = last.studentName || student?.name || "الطالب";
+        const status = last.status || "حضور";
 
-      let title = "منظومة الرياضيات - الأستاذة إيمان الدمشيتي";
-      let body = "";
-      let eventType = "attendance";
+        let title = "منظومة الرياضيات - الأستاذة إيمان الدمشيتي";
+        let body = "";
+        let eventType = "attendance";
 
-      if (status === "حضور") {
-        title = `🟢 تسجيل حضور: ${studentName}`;
-        body = `تم تسجيل حضور ووصول الطالب (${studentName}) في المركز بنجاح (${last.timeDisplay || "الآن"}).`;
-        eventType = "attendance";
-      } else if (status === "تأخير") {
-        title = `⚠️ تنبيه تأخير: ${studentName}`;
-        body = `تم تسجيل حضور الطالب (${studentName}) متأخراً عن موعد بداية الحصة (${last.timeDisplay || "الآن"}).`;
-        eventType = "late";
-      } else if (status === "غياب") {
-        title = `🔴 تنبيه غياب: ${studentName}`;
-        body = `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${studentName}) عن حصة اليوم.`;
-        eventType = "absence";
+        if (status === "حضور") {
+          title = `🟢 تسجيل حضور: ${studentName}`;
+          body = `تم تسجيل حضور ووصول الطالب (${studentName}) في المركز بنجاح (${last.timeDisplay || "الآن"}).`;
+          eventType = "attendance";
+        } else if (status === "تأخير") {
+          title = `⚠️ تنبيه تأخير: ${studentName}`;
+          body = `تم تسجيل حضور الطالب (${studentName}) متأخراً عن موعد بداية الحصة (${last.timeDisplay || "الآن"}).`;
+          eventType = "late";
+        } else if (status === "غياب") {
+          title = `🔴 تنبيه غياب: ${studentName}`;
+          body = `نحيطكم علماً بأنه تم تسجيل غياب الطالب (${studentName}) عن حصة اليوم.`;
+          eventType = "absence";
+        }
+
+        const targets: string[] = [barcode];
+        if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+        if (student?.phone) targets.push(String(student.phone).trim());
+        targets.push("admin");
+
+        console.log(`[Background Push] Live scan event detected: ${studentName} (${status}). Sending push to:`, targets);
+        await sendWebPushToTargets({
+          targetUserIds: targets,
+          title,
+          body,
+          icon: "/icon.svg",
+          badge: "/icon.svg",
+          type: eventType,
+          sound: "/notification.wav",
+          url: `/?tab=attendance&barcode=${barcode}`,
+          eventId: last.id || `live-${last.timestamp}`,
+        });
+      },
+      (err) => {
+        if (handleFirestoreQuotaWarning("live_events listener", err)) {
+          detachAllFirestoreListeners();
+        } else {
+          console.warn("[Background Push] live_events onSnapshot notice:", err.message || err);
+        }
       }
-
-      const targets: string[] = [barcode];
-      if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
-      if (student?.phone) targets.push(String(student.phone).trim());
-      targets.push("admin");
-
-      console.log(`[Background Push] Live scan event detected: ${studentName} (${status}). Sending push to:`, targets);
-      await sendWebPushToTargets({
-        targetUserIds: targets,
-        title,
-        body,
-        icon: "/icon.svg",
-        badge: "/icon.svg",
-        type: eventType,
-        sound: "/notification.wav",
-        url: `/?tab=attendance&barcode=${barcode}`,
-        eventId: last.id || `live-${last.timestamp}`,
-      });
-    }, (err) => {
-      console.warn("[Background Push] live_events onSnapshot warning:", err.message);
-    });
+    );
   } catch (err: any) {
-    console.warn("[Background Push] failed to listen to live_events:", err.message);
+    if (handleFirestoreQuotaWarning("live_events listener setup", err)) {
+      detachAllFirestoreListeners();
+    } else {
+      console.warn("[Background Push] failed to listen to live_events:", err.message || err);
+    }
   }
 
   // 3. Listen to system_state/main_center_data for students and new payments (debounced)
   let paymentCheckTimer: NodeJS.Timeout | null = null;
   try {
-    onSnapshot(doc(db, "system_state", "main_center_data"), (snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data() as any;
-      if (Array.isArray(data?.students)) {
-        cachedStudents = data.students;
-      }
+    unsubSystemState = onSnapshot(
+      doc(db, "system_state", "main_center_data"),
+      (snap) => {
+        if (!snap.exists()) return;
+        const data = snap.data() as any;
+        if (Array.isArray(data?.students)) {
+          cachedStudents = data.students;
+        }
 
-      // Debounce payment checking to avoid blocking the event loop on rapid scan bursts
-      if (paymentCheckTimer) clearTimeout(paymentCheckTimer);
-      paymentCheckTimer = setTimeout(async () => {
-        const payments = data?.payments;
-        if (payments && typeof payments === "object") {
-          const currentKeys = new Set<string>();
-          const newPaymentsToNotify: Array<{ monthKey: string; barcode: string; rec: any }> = [];
+        // Debounce payment checking to avoid blocking the event loop on rapid scan bursts
+        if (paymentCheckTimer) clearTimeout(paymentCheckTimer);
+        paymentCheckTimer = setTimeout(async () => {
+          const payments = data?.payments;
+          if (payments && typeof payments === "object") {
+            const currentKeys = new Set<string>();
+            const newPaymentsToNotify: Array<{ monthKey: string; barcode: string; rec: any }> = [];
 
-          for (const [mKey, map] of Object.entries(payments)) {
-            if (map && typeof map === "object") {
-              for (const [bCode, rec] of Object.entries(map as any)) {
-                if (rec && Number((rec as any).amount) > 0) {
-                  const key = `${mKey}:${bCode}`;
-                  currentKeys.add(key);
-                  if (isInitialPaymentsLoaded && !knownPayments.has(key)) {
-                    newPaymentsToNotify.push({ monthKey: mKey, barcode: bCode, rec });
+            for (const [mKey, map] of Object.entries(payments)) {
+              if (map && typeof map === "object") {
+                for (const [bCode, rec] of Object.entries(map as any)) {
+                  if (rec && Number((rec as any).amount) > 0) {
+                    const key = `${mKey}:${bCode}`;
+                    currentKeys.add(key);
+                    if (isInitialPaymentsLoaded && !knownPayments.has(key)) {
+                      newPaymentsToNotify.push({ monthKey: mKey, barcode: bCode, rec });
+                    }
                   }
                 }
               }
             }
-          }
 
-          knownPayments = currentKeys;
-          if (!isInitialPaymentsLoaded) {
-            isInitialPaymentsLoaded = true;
-          } else {
-            for (const item of newPaymentsToNotify) {
-              const student = cachedStudents.find((s) => String(s.barcode).trim() === item.barcode);
-              const studentName = student?.name || item.rec?.studentName || "الطالب";
-              const amount = item.rec?.amount || 0;
-              const title = `💳 سداد مصاريف: ${studentName}`;
-              const body = `تم بنجاح سداد اشتراك شهر (${item.monthKey}) للطالب (${studentName}) بمبلغ ${amount} ج.م.`;
+            knownPayments = currentKeys;
+            if (!isInitialPaymentsLoaded) {
+              isInitialPaymentsLoaded = true;
+            } else {
+              for (const item of newPaymentsToNotify) {
+                const student = cachedStudents.find((s) => String(s.barcode).trim() === item.barcode);
+                const studentName = student?.name || item.rec?.studentName || "الطالب";
+                const amount = item.rec?.amount || 0;
+                const title = `💳 سداد مصاريف: ${studentName}`;
+                const body = `تم بنجاح سداد اشتراك شهر (${item.monthKey}) للطالب (${studentName}) بمبلغ ${amount} ج.م.`;
 
-              const targets: string[] = [item.barcode];
-              if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
-              if (student?.phone) targets.push(String(student.phone).trim());
-              targets.push("admin");
+                const targets: string[] = [item.barcode];
+                if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
+                if (student?.phone) targets.push(String(student.phone).trim());
+                targets.push("admin");
 
-              console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
-              await sendWebPushToTargets({
-                targetUserIds: targets,
-                title,
-                body,
-                icon: "/icon.svg",
-                badge: "/icon.svg",
-                type: "payment",
-                sound: "/notification.wav",
-                url: `/?tab=expenses&barcode=${item.barcode}`,
-                eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
-              });
+                console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
+                await sendWebPushToTargets({
+                  targetUserIds: targets,
+                  title,
+                  body,
+                  icon: "/icon.svg",
+                  badge: "/icon.svg",
+                  type: "payment",
+                  sound: "/notification.wav",
+                  url: `/?tab=expenses&barcode=${item.barcode}`,
+                  eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
+                });
+              }
             }
           }
+        }, 1000);
+      },
+      (err) => {
+        if (handleFirestoreQuotaWarning("main_center_data listener", err)) {
+          detachAllFirestoreListeners();
+        } else {
+          console.warn("[Background Push] main_center_data onSnapshot notice:", err.message || err);
         }
-      }, 1000);
-    }, (err) => {
-      console.warn("[Background Push] main_center_data onSnapshot warning:", err.message);
-    });
+      }
+    );
   } catch (err: any) {
-    console.warn("[Background Push] failed to listen to system_state:", err.message);
+    if (handleFirestoreQuotaWarning("main_center_data listener setup", err)) {
+      detachAllFirestoreListeners();
+    } else {
+      console.warn("[Background Push] failed to listen to system_state:", err.message || err);
+    }
   }
 }
 

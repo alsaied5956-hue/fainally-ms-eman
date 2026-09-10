@@ -1,5 +1,6 @@
 import { doc, setDoc, onSnapshot, arrayUnion } from "firebase/firestore";
 import { db, ensureFirebaseAuth } from "./firebase";
+import { isFirestoreQuotaError } from "./storage";
 
 export interface LiveAttendanceEvent {
   studentId: string;
@@ -164,7 +165,9 @@ export function subscribeToLiveEventStream(
       }
     },
     (err) => {
-      console.warn("Live events stream onSnapshot error:", err);
+      if (!isFirestoreQuotaError(err)) {
+        console.warn("Live events stream onSnapshot notice:", err);
+      }
       if (onError) onError(err);
     }
   );

@@ -263,8 +263,12 @@ export function isFirestoreQuotaError(e: unknown): boolean {
     code.includes("429") ||
     status === "RESOURCE_EXHAUSTED" ||
     msg.includes("Quota limit exceeded") ||
-    msg.includes("resource-exhausted") ||
+    msg.includes("Quota exceeded") ||
     msg.includes("quota metric") ||
+    msg.includes("resource-exhausted") ||
+    msg.includes("RESOURCE_EXHAUSTED") ||
+    msg.includes("free quota limits") ||
+    msg.includes("Free daily read units") ||
     msg.includes("Free daily write units")
   );
 }

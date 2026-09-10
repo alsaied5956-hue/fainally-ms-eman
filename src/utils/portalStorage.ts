@@ -9,7 +9,7 @@ import {
   AdminActivityLog,
 } from "../types/portal";
 import { playPortalAudioChime } from "./portalNotifications";
-import { loadLocalData } from "./storage";
+import { loadLocalData, isFirestoreQuotaError } from "./storage";
 
 // Storage Keys
 const LS_PARENT_ACCOUNTS = "eman_parent_accounts";
@@ -645,7 +645,9 @@ export function subscribeToAllParentAccounts(
             mergeAndNotify(incoming);
           },
           (err) => {
-            console.warn("Realtime parent_accounts listener notice:", err);
+            if (!isFirestoreQuotaError(err)) {
+              console.warn("Realtime parent_accounts listener notice:", err);
+            }
           }
         );
 
@@ -662,7 +664,9 @@ export function subscribeToAllParentAccounts(
             }
           },
           (err) => {
-            console.warn("Realtime registry listener notice:", err);
+            if (!isFirestoreQuotaError(err)) {
+              console.warn("Realtime registry listener notice:", err);
+            }
           }
         );
 
@@ -690,7 +694,9 @@ export function subscribeToAllParentAccounts(
             mergeAndNotify(incoming);
           },
           (err) => {
-            console.warn("Realtime revocations listener notice:", err);
+            if (!isFirestoreQuotaError(err)) {
+              console.warn("Realtime revocations listener notice:", err);
+            }
           }
         );
       } catch (err) {
