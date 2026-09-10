@@ -37,6 +37,14 @@ service cloud.firestore {
       allow read, write, delete: if true;
     }
 
+    match /parent_account_revocations/{accountId} {
+      allow read, write, delete: if true;
+    }
+
+    match /account_revocations/{accountId} {
+      allow read, write, delete: if true;
+    }
+
     match /parent_chats/{chatId} {
       allow read, write, delete: if true;
     }

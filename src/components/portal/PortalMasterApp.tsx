@@ -42,13 +42,13 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
   }, []);
 
   // Handle logout
-  const handleLogout = useCallback((keepNotice: boolean = true) => {
+  function handleLogout(keepNotice: boolean = true) {
     setSession(null);
     savePortalSession(null);
     if (!keepNotice) {
       setRevocationNotice(null);
     }
-  }, []);
+  }
 
   // Live remote logout watcher:
   // If admin explicitly disables or revokes account, force remote logout

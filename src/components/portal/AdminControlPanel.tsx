@@ -198,7 +198,8 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     for (const st of students) {
       handledBarcodes.add(st.barcode);
       const acc = accounts[st.barcode];
-      const status: "active" | "unactivated" | "disabled" = acc ? acc.status : "unactivated";
+      const status: "active" | "unactivated" | "disabled" =
+        acc?.status === "active" ? "active" : acc?.status === "disabled" ? "disabled" : "unactivated";
       const phone = acc?.parentPhone || st.parentPhone || st.phone || "";
 
       list.push({
@@ -217,13 +218,13 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
 
     // 2. Extra parent accounts not directly in students list (if any)
     for (const [bCode, acc] of Object.entries(accounts) as [string, ParentAccount][]) {
-      if (!handledBarcodes.has(bCode) && acc) {
+      if (!handledBarcodes.has(bCode) && acc && acc.status !== "deleted") {
         list.push({
           barcode: bCode,
-          studentName: `طالب (${bCode})`,
+          studentName: acc.studentName || `طالب (${bCode})`,
           grade: "غير محدد",
           parentPhone: acc.parentPhone,
-          status: acc.status,
+          status: acc.status === "disabled" ? "disabled" : "active",
           account: acc,
           password: acc.password,
           linkedCount: acc.linkedBarcodes?.length || 0,

@@ -147,87 +147,113 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
   accounts[account.studentBarcode] = account;
   saveLocalParentAccounts(accounts);
 
-  // If status is disabled, immediately broadcast revocation to log out parent device
-  if (account.status === "disabled") {
+  // If status is disabled or deleted, immediately broadcast revocation to log out parent device
+  if (account.status === "disabled" || account.status === "deleted") {
+    const reasonText =
+      account.status === "disabled"
+        ? "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة."
+        : "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
     accountEventsBus?.postMessage({
       type: "ACCOUNT_REVOKED",
       barcode: account.studentBarcode,
-      reason: "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.",
+      reason: reasonText,
     });
     if (typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("eman_account_revoked", {
           detail: {
             barcode: account.studentBarcode,
-            reason: "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.",
+            reason: reasonText,
           },
         })
       );
     }
   }
 
-  // Reliable background cloud save tied to real Firestore
-  (async () => {
-    try {
-      await ensureFirebaseAuth();
-      if (db) {
-        // 1. Save individual doc
-        await setDoc(doc(db, "parent_accounts", account.studentBarcode), account, { merge: true });
-        // 2. Save in synchronized state registry
-        const allAccs = getLocalParentAccounts();
-        await setDoc(
-          doc(db, "system_state", "portal_accounts_registry"),
-          { accounts: allAccs, updatedAt: new Date().toISOString() },
-          { merge: true }
-        );
+  // Reliable cloud persistence tied to Firestore
+  try {
+    await ensureFirebaseAuth();
+    if (db) {
+      // 1. Save individual document
+      await setDoc(doc(db, "parent_accounts", account.studentBarcode), account, { merge: true });
+      // 2. Clear any lingering revocation record if account is activated
+      if (account.status === "active") {
+        try {
+          await deleteDoc(doc(db, "account_revocations", account.studentBarcode));
+        } catch {}
       }
-    } catch (err) {
-      console.warn("Cloud parent account save notice:", err);
+      // 3. Save in synchronized state registry
+      const allAccs = getLocalParentAccounts();
+      allAccs[account.studentBarcode] = account;
+      await setDoc(
+        doc(db, "system_state", "portal_accounts_registry"),
+        { accounts: allAccs, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
     }
-  })();
+  } catch (err) {
+    console.warn("Cloud parent account save notice:", err);
+  }
 }
 
 /**
  * Delete / Reset parent account (forces first-time registration again and remote logout)
  */
 export async function deleteParentAccount(studentBarcode: string): Promise<void> {
+  const cleanBarcode = String(studentBarcode).trim();
   const accounts = getLocalParentAccounts();
-  delete accounts[studentBarcode];
+  delete accounts[cleanBarcode];
   saveLocalParentAccounts(accounts);
 
-  // Broadcast revocation immediately to disconnect parent session on their device
+  // 1. Broadcast revocation immediately across same device tabs
+  const revokeReason = "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
   accountEventsBus?.postMessage({
     type: "ACCOUNT_REVOKED",
-    barcode: studentBarcode,
-    reason: "تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.",
+    barcode: cleanBarcode,
+    reason: revokeReason,
   });
   if (typeof window !== "undefined") {
     window.dispatchEvent(
       new CustomEvent("eman_account_revoked", {
         detail: {
-          barcode: studentBarcode,
-          reason: "تم حذف أو إلغاء تفعيل هذا الحساب من قِبل إدارة المنظومة.",
+          barcode: cleanBarcode,
+          reason: revokeReason,
         },
       })
     );
   }
 
-  // Non-blocking background cloud delete - zero latency for the user
-  (async () => {
-    try {
-      await ensureFirebaseAuth();
-      if (db) {
-        await deleteDoc(doc(db, "parent_accounts", studentBarcode));
-        await setDoc(
-          doc(db, "system_state", "portal_accounts_registry"),
-          { accounts, updatedAt: new Date().toISOString() },
-          { merge: true }
-        );
-      }
-    } catch (err) {
-      console.warn("Cloud parent account delete notice:", err);
+  // 2. Multi-channel cloud revocation & deletion to guarantee remote mobile logout
+  try {
+    await ensureFirebaseAuth();
+    if (db) {
+      // First, update document status to "deleted" so active Firestore snapshot listeners trigger immediately
+      await setDoc(
+        doc(db, "parent_accounts", cleanBarcode),
+        { studentBarcode: cleanBarcode, status: "deleted", deletedAt: new Date().toISOString() },
+        { merge: true }
+      );
+
+      // Second, register in dedicated account_revocations collection so it acts as an explicit tombstone
+      await setDoc(doc(db, "account_revocations", cleanBarcode), {
+        barcode: cleanBarcode,
+        reason: revokeReason,
+        revokedAt: new Date().toISOString(),
+      });
+
+      // Third, delete the doc from parent_accounts
+      await deleteDoc(doc(db, "parent_accounts", cleanBarcode));
+
+      // Fourth, update the cloud accounts registry
+      await setDoc(
+        doc(db, "system_state", "portal_accounts_registry"),
+        { accounts, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
     }
-  })();
+  } catch (err) {
+    console.warn("Cloud parent account delete notice:", err);
+  }
 }
 
 /**
@@ -236,7 +262,9 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
  * 2. Custom window events (same tab)
  * 3. LocalStorage storage event (browser-wide)
  * 4. Firestore onSnapshot on the parent_accounts document (cross-device / mobile to PC)
- * 5. Periodic fallback safety interval
+ * 5. Firestore onSnapshot on account_revocations (explicit revocation stream)
+ * 6. Firestore onSnapshot on portal_accounts_registry (global accounts registry)
+ * 7. Visibility and Focus listeners + periodic safety check
  */
 export function subscribeToParentAccountLiveStatus(
   studentBarcode: string,
@@ -244,6 +272,13 @@ export function subscribeToParentAccountLiveStatus(
 ): () => void {
   const targetBarcode = String(studentBarcode).trim();
   let isCancelled = false;
+  let hasFiredRevocation = false;
+
+  const triggerRevoke = (reason: string) => {
+    if (isCancelled || hasFiredRevocation) return;
+    hasFiredRevocation = true;
+    onRevoked(reason);
+  };
 
   // 1. BroadcastChannel listener (same device / multi-tab)
   const handleBusMessage = (ev: MessageEvent) => {
@@ -251,7 +286,7 @@ export function subscribeToParentAccountLiveStatus(
       ev.data?.type === "ACCOUNT_REVOKED" &&
       String(ev.data?.barcode).trim() === targetBarcode
     ) {
-      onRevoked(ev.data.reason || "تم تعطيل هذا الحساب من قِبل إدارة المنظومة.");
+      triggerRevoke(ev.data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
     }
   };
   accountEventsBus?.addEventListener("message", handleBusMessage);
@@ -260,7 +295,7 @@ export function subscribeToParentAccountLiveStatus(
   const handleWindowEvent = (ev: Event) => {
     const customEv = ev as CustomEvent;
     if (String(customEv.detail?.barcode).trim() === targetBarcode) {
-      onRevoked(customEv.detail.reason || "تم تعطيل هذا الحساب من قِبل إدارة المنظومة.");
+      triggerRevoke(customEv.detail.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
     }
   };
   if (typeof window !== "undefined") {
@@ -269,12 +304,18 @@ export function subscribeToParentAccountLiveStatus(
 
   // 3. Storage event listener (cross-tab LocalStorage modification)
   const handleStorageEvent = (ev: StorageEvent) => {
-    if (ev.key === LS_PARENT_ACCOUNTS && ev.newValue) {
+    if (ev.key === LS_PARENT_ACCOUNTS) {
+      if (!ev.newValue) {
+        triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        return;
+      }
       try {
         const accs = JSON.parse(ev.newValue) as Record<string, ParentAccount>;
         const acc = accs[targetBarcode];
-        if (acc && acc.status === "disabled") {
-          onRevoked("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+        if (!acc || acc.status === "deleted") {
+          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        } else if (acc.status === "disabled") {
+          triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
         }
       } catch {}
     }
@@ -283,24 +324,73 @@ export function subscribeToParentAccountLiveStatus(
     window.addEventListener("storage", handleStorageEvent);
   }
 
-  // 4. Firestore Realtime Listener for remote admin deactivations
+  // 4. Firestore Realtime Listeners for remote admin actions (PC to mobile)
   let unsubscribeDoc: (() => void) | null = null;
+  let unsubscribeRevocations: (() => void) | null = null;
+  let unsubscribeRegistry: (() => void) | null = null;
+
   ensureFirebaseAuth()
     .then(() => {
       if (isCancelled || !db) return;
       try {
+        // A. Listen directly to parent_accounts/{barcode}
         unsubscribeDoc = onSnapshot(
           doc(db, "parent_accounts", targetBarcode),
           (snap) => {
-            if (snap.exists()) {
-              const data = snap.data() as ParentAccount;
-              if (data && data.status === "disabled") {
-                onRevoked("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+            if (isCancelled) return;
+            // Document does not exist => deleted by admin remotely!
+            if (!snap.exists()) {
+              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              return;
+            }
+            const data = snap.data() as ParentAccount;
+            if (data) {
+              if (data.status === "deleted") {
+                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              } else if (data.status === "disabled") {
+                triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
               }
             }
           },
           (err) => {
             console.warn("Firestore parent live listener notice:", err);
+          }
+        );
+
+        // B. Listen to explicit account_revocations tombstone stream
+        unsubscribeRevocations = onSnapshot(
+          doc(db, "account_revocations", targetBarcode),
+          (snap) => {
+            if (isCancelled) return;
+            if (snap.exists()) {
+              const revData = snap.data();
+              triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            }
+          },
+          (err) => {
+            console.warn("Firestore revocations listener notice:", err);
+          }
+        );
+
+        // C. Listen to cloud registry updates
+        unsubscribeRegistry = onSnapshot(
+          doc(db, "system_state", "portal_accounts_registry"),
+          (snap) => {
+            if (isCancelled) return;
+            if (snap.exists()) {
+              const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
+              if (regData) {
+                const acc = regData[targetBarcode];
+                if (!acc || acc.status === "deleted") {
+                  triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+                } else if (acc.status === "disabled") {
+                  triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+                }
+              }
+            }
+          },
+          (err) => {
+            console.warn("Firestore registry listener notice:", err);
           }
         );
       } catch (e) {
@@ -309,14 +399,54 @@ export function subscribeToParentAccountLiveStatus(
     })
     .catch(() => {});
 
+  // 5. Periodic check and window focus/visibility handler (mobile resumes from sleep/background)
+  const checkStatus = async () => {
+    if (isCancelled || hasFiredRevocation) return;
+    try {
+      await ensureFirebaseAuth();
+      if (db) {
+        // Check if doc exists
+        const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
+        if (!snap.exists()) {
+          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+          return;
+        }
+        const data = snap.data() as ParentAccount;
+        if (data.status === "deleted") {
+          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        } else if (data.status === "disabled") {
+          triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+        }
+      }
+    } catch {}
+  };
+
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      checkStatus();
+    }
+  };
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", checkStatus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
+
+  const pollInterval = setInterval(checkStatus, 12000);
+
   return () => {
     isCancelled = true;
     accountEventsBus?.removeEventListener("message", handleBusMessage);
     if (typeof window !== "undefined") {
       window.removeEventListener("eman_account_revoked", handleWindowEvent);
       window.removeEventListener("storage", handleStorageEvent);
+      window.removeEventListener("focus", checkStatus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
+    clearInterval(pollInterval);
     if (unsubscribeDoc) unsubscribeDoc();
+    if (unsubscribeRevocations) unsubscribeRevocations();
+    if (unsubscribeRegistry) unsubscribeRegistry();
   };
 }
 
@@ -328,7 +458,7 @@ export async function registerParentAccount(
   enteredPhone: string,
   password: string,
   students: Student[]
-): Promise<{ success: boolean; message: string; account?: ParentAccount }> {
+): Promise<{ success: boolean; message: string; account?: ParentAccount; alreadyActive?: boolean; barcode?: string }> {
   const barcodeTrimmed = studentBarcode.trim();
   const phoneTrimmed = enteredPhone.trim();
   const passTrimmed = password.trim();
@@ -387,23 +517,39 @@ export async function registerParentAccount(
     }
   }
 
-  // 3. Check if account already exists
+  // 3. Check if account already exists & is active (check both LocalStorage and Cloud Firestore!)
   const existingAccounts = getLocalParentAccounts();
-  const existing = existingAccounts[student.barcode] || existingAccounts[barcodeTrimmed];
-  if (existing) {
-    // If account exists, update password and ensure active, then return it for instant login
-    existing.password = passTrimmed;
-    existing.parentPhone = phoneTrimmed;
-    existing.studentName = student.name;
-    existing.status = "active";
-    existing.updatedAt = new Date().toISOString();
-    existingAccounts[student.barcode] = existing;
-    saveLocalParentAccounts(existingAccounts);
-    persistParentAccount(existing).catch(() => {});
+  let existing = existingAccounts[student.barcode] || existingAccounts[barcodeTrimmed];
+
+  // If not found locally or not active locally, check Cloud Firestore directly
+  // (In case the supervisor activated it from another device like PC)
+  if (!existing || existing.status !== "active") {
+    try {
+      await ensureFirebaseAuth();
+      if (db) {
+        const cloudSnap = await getDoc(doc(db, "parent_accounts", student.barcode));
+        if (cloudSnap.exists()) {
+          const cloudData = cloudSnap.data() as ParentAccount;
+          if (cloudData && cloudData.status === "active") {
+            existing = cloudData;
+            existingAccounts[student.barcode] = cloudData;
+            saveLocalParentAccounts(existingAccounts);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Cloud account check in register:", err);
+    }
+  }
+
+  // IF ACCOUNT IS ALREADY ACTIVATED:
+  // Strictly prevent re-registration, prevent overwriting password, and prevent login!
+  if (existing && existing.status === "active") {
     return {
-      success: true,
-      message: `تم تفعيل وتحديث حساب ولي أمر الطالب (${student.name}) بنجاح!`,
-      account: existing,
+      success: false,
+      alreadyActive: true,
+      barcode: student.barcode,
+      message: `تم تفعيل هذا الحساب من قبل من قِبل إدارة المنظومة! يرجى التوجه إلى شاشة "تسجيل الدخول" وإدخال كود الطالب (${student.barcode}) وكلمة المرور المسلمة لك للدخول.`,
     };
   }
 
@@ -422,8 +568,8 @@ export async function registerParentAccount(
   existingAccounts[student.barcode] = newAccount;
   saveLocalParentAccounts(existingAccounts);
 
-  // Reliable background cloud persistence (tied to real Firestore)
-  persistParentAccount(newAccount).catch(() => {});
+  // Reliable cloud persistence (tied to real Firestore)
+  await persistParentAccount(newAccount);
 
   return {
     success: true,
@@ -440,11 +586,22 @@ export async function activateParentAccountDirectly(
   phone: string,
   password: string
 ): Promise<ParentAccount> {
+  const cleanBarcode = studentBarcode.trim();
   const accounts = getLocalParentAccounts();
-  const existing = accounts[studentBarcode.trim()];
+  const existing = accounts[cleanBarcode];
+
+  // Find student name from roster if not already known
+  let studentName = existing?.studentName;
+  if (!studentName) {
+    const localData = loadLocalData();
+    const st = localData?.students?.find((s) => String(s.barcode).trim() === cleanBarcode);
+    if (st) studentName = st.name;
+  }
+
   const newAccount: ParentAccount = {
-    studentBarcode: studentBarcode.trim(),
-    linkedBarcodes: existing?.linkedBarcodes || [],
+    studentBarcode: cleanBarcode,
+    studentName: studentName || existing?.studentName,
+    linkedBarcodes: existing?.linkedBarcodes || [cleanBarcode],
     parentPhone: phone.trim(),
     password: password.trim(),
     status: "active",
@@ -452,9 +609,18 @@ export async function activateParentAccountDirectly(
     updatedAt: new Date().toISOString(),
   };
 
-  accounts[studentBarcode.trim()] = newAccount;
+  accounts[cleanBarcode] = newAccount;
   saveLocalParentAccounts(accounts);
   await persistParentAccount(newAccount);
+
+  // Clear any old revocation record in cloud
+  try {
+    await ensureFirebaseAuth();
+    if (db) {
+      await deleteDoc(doc(db, "account_revocations", cleanBarcode));
+    }
+  } catch {}
+
   return newAccount;
 }
 
@@ -466,20 +632,27 @@ export async function batchActivateParentAccounts(
   defaultPassword: string
 ): Promise<number> {
   const accounts = getLocalParentAccounts();
+  const localData = loadLocalData();
   let count = 0;
+  const activatedList: ParentAccount[] = [];
+
   for (const item of items) {
     const bCode = item.studentBarcode.trim();
     if (!bCode) continue;
-    if (!accounts[bCode]) {
-      accounts[bCode] = {
+    if (!accounts[bCode] || accounts[bCode].status !== "active") {
+      const st = localData?.students?.find((s) => String(s.barcode).trim() === bCode);
+      const acc: ParentAccount = {
         studentBarcode: bCode,
-        linkedBarcodes: [],
+        studentName: st?.name || accounts[bCode]?.studentName,
+        linkedBarcodes: [bCode],
         parentPhone: item.phone.trim() || "0",
         password: defaultPassword.trim() || "1234",
         status: "active",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+      accounts[bCode] = acc;
+      activatedList.push(acc);
       count++;
     }
   }
@@ -487,6 +660,12 @@ export async function batchActivateParentAccounts(
   try {
     await ensureFirebaseAuth();
     if (db) {
+      for (const acc of activatedList) {
+        await setDoc(doc(db, "parent_accounts", acc.studentBarcode), acc, { merge: true });
+        try {
+          await deleteDoc(doc(db, "account_revocations", acc.studentBarcode));
+        } catch {}
+      }
       await setDoc(
         doc(db, "system_state", "portal_accounts_registry"),
         { accounts, updatedAt: new Date().toISOString() },
@@ -542,21 +721,21 @@ export async function authenticatePortalLogin(
     );
   }
 
-  // 3. Fast cloud fallback if account is missing on a freshly opened device
-  if (!account) {
+  // 3. Fast cloud fallback if account is missing on a freshly opened device or if local password doesn't match
+  // (In case supervisor set/updated password or activated account on another device)
+  if (!account || account.password !== passTrimmed) {
     try {
       await ensureFirebaseAuth();
-      const docSnap = await Promise.race([
-        getDoc(doc(db, "parent_accounts", barcodeTrimmed)),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
-      ]);
-      if (docSnap && docSnap.exists()) {
-        const cloudAcc = docSnap.data() as ParentAccount;
-        if (cloudAcc && cloudAcc.studentBarcode) {
-          account = cloudAcc;
-          accounts = getLocalParentAccounts();
-          accounts[account.studentBarcode] = account;
-          saveLocalParentAccounts(accounts);
+      if (db) {
+        const docSnap = await getDoc(doc(db, "parent_accounts", barcodeTrimmed));
+        if (docSnap && docSnap.exists()) {
+          const cloudAcc = docSnap.data() as ParentAccount;
+          if (cloudAcc && cloudAcc.studentBarcode) {
+            account = cloudAcc;
+            accounts = getLocalParentAccounts();
+            accounts[account.studentBarcode] = account;
+            saveLocalParentAccounts(accounts);
+          }
         }
       }
     } catch {}
@@ -572,7 +751,7 @@ export async function authenticatePortalLogin(
     } catch {}
   }
 
-  if (!account) {
+  if (!account || account.status === "deleted") {
     // Check if student exists in roster to give a helpful guidance message
     const cleanEntered = normalizePhone(barcodeTrimmed);
     let studentList = students;
@@ -590,7 +769,7 @@ export async function authenticatePortalLogin(
     if (student) {
       return {
         success: false,
-        message: `لم يتم تفعيل حساب ولي أمر الطالب (${student.name}) بعد. اضغط على تبويب "تفعيل حساب جديد" بالأسفل لإتمام التفعيل والربط الفوري.`,
+        message: `لم يتم تفعيل حساب ولي أمر الطالب (${student.name}) بعد. يرجى مراجعة إدارة المركز للتفعيل، أو استخدام تبويب "تفعيل حساب جديد".`,
       };
     }
     return {
@@ -609,7 +788,7 @@ export async function authenticatePortalLogin(
   if (account.password !== passTrimmed) {
     return {
       success: false,
-      message: "كلمة المرور غير صحيحة. يرجى إعادة المحاولة.",
+      message: "كلمة المرور غير صحيحة. يرجى التأكد من كلمة المرور المسلمة لك من قِبل المشرف.",
     };
   }
 

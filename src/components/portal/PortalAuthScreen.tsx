@@ -52,12 +52,14 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [isAlreadyActiveNotice, setIsAlreadyActiveNotice] = useState(false);
 
   // Submit Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setIsAlreadyActiveNotice(false);
     setIsLoading(true);
 
     try {
@@ -81,6 +83,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+    setIsAlreadyActiveNotice(false);
 
     if (regPassword !== regConfirmPassword) {
       setErrorMsg("كلمتا المرور غير متطابقتين. يرجى التأكد وإعادة الإدخال.");
@@ -97,11 +100,18 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
     try {
       const res = await registerParentAccount(regBarcode, regPhone, regPassword, students);
       if (res.success && res.account) {
+        setIsAlreadyActiveNotice(false);
         setSuccessMsg(res.message);
         // Instant instantaneous transition
         onLoginSuccess("parent", res.account, res.account.studentBarcode);
       } else {
         setErrorMsg(res.message);
+        if (res.alreadyActive) {
+          setIsAlreadyActiveNotice(true);
+          if (res.barcode) {
+            setLoginBarcode(res.barcode);
+          }
+        }
       }
     } catch (err) {
       setErrorMsg("تعذر إتمام التسجيل السحابي. يرجى التحقق من اتصال الإنترنت.");
@@ -157,6 +167,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                 setActiveTab("login");
                 setErrorMsg(null);
                 setSuccessMsg(null);
+                setIsAlreadyActiveNotice(false);
               }}
               className={`py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
                 activeTab === "login"
@@ -174,6 +185,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                 setActiveTab("register");
                 setErrorMsg(null);
                 setSuccessMsg(null);
+                setIsAlreadyActiveNotice(false);
               }}
               className={`py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
                 activeTab === "register"
@@ -216,6 +228,34 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
             <div className="p-3.5 rounded-2xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5 animate-fadeIn">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
               <span className="leading-relaxed">{errorMsg}</span>
+            </div>
+          )}
+
+          {/* Prompt to switch to Login tab immediately if account was already activated */}
+          {isAlreadyActiveNotice && activeTab === "register" && (
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/10 to-transparent border border-amber-500/40 text-amber-200 text-xs space-y-3 animate-fadeIn">
+              <div className="flex items-start gap-2.5">
+                <ShieldCheck className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-extrabold text-amber-300 text-sm">الحساب مفعل بالفعل!</p>
+                  <p className="text-slate-300 leading-relaxed font-tajawal">
+                    تم تفعيل هذا الحساب مسبقاً من قِبل المشرف. لا يمكن إعادة تفعيله مرة أخرى، يرجى التوجه لخانة تسجيل الدخول وكتابة كود الطالب وكلمة المرور المسجلة.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("login");
+                  setErrorMsg(null);
+                  setSuccessMsg("أدخل كلمة المرور المعتمدة من المشرف للدخول.");
+                  setIsAlreadyActiveNotice(false);
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition active:scale-95 cursor-pointer"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>الانتقال لتسجيل الدخول بكود الطالب الآن ↵</span>
+              </button>
             </div>
           )}
 

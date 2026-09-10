@@ -6,7 +6,7 @@ export interface ParentAccount {
   linkedBarcodes: string[];
   parentPhone: string;
   password: string;
-  status: "active" | "disabled";
+  status: "active" | "disabled" | "deleted";
   createdAt: string;
   updatedAt?: string;
   lastLoginAt?: string;
