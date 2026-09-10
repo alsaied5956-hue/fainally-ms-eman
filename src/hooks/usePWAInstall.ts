@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-interface BeforeInstallPromptEvent extends Event {
+export interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 }
@@ -24,23 +24,58 @@ export interface PWAInstallState {
   isAndroid: boolean;
   isInAppBrowser: boolean;
   isTelegram: boolean;
+  isInIframe: boolean;
   browserType: BrowserEnvironment;
-  install: () => Promise<boolean>;
+  install: () => Promise<"accepted" | "dismissed" | "failed" | "not_supported">;
   openInExternalBrowser: () => void;
+  openInNewTab: () => void;
   copyAppUrl: () => Promise<boolean>;
 }
 
+declare global {
+  interface Window {
+    __pwaDeferredPrompt?: BeforeInstallPromptEvent | null;
+    __pwaPromptListeners?: Array<(e: BeforeInstallPromptEvent | null) => void>;
+  }
+}
+
+// Capture beforeinstallprompt immediately at module evaluation time
+if (typeof window !== "undefined") {
+  if (!window.__pwaPromptListeners) {
+    window.__pwaPromptListeners = [];
+  }
+
+  window.addEventListener("beforeinstallprompt", (e: Event) => {
+    e.preventDefault();
+    const promptEvt = e as BeforeInstallPromptEvent;
+    window.__pwaDeferredPrompt = promptEvt;
+    window.__pwaPromptListeners?.forEach((cb) => cb(promptEvt));
+  });
+
+  window.addEventListener("appinstalled", () => {
+    window.__pwaDeferredPrompt = null;
+    window.__pwaPromptListeners?.forEach((cb) => cb(null));
+  });
+}
+
 export function usePWAInstall(): PWAInstallState {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
+    return typeof window !== "undefined" ? window.__pwaDeferredPrompt || null : null;
+  });
   const [isInstalled, setIsInstalled] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
   const [isAndroid, setIsAndroid] = useState(false);
   const [isInAppBrowser, setIsInAppBrowser] = useState(false);
   const [isTelegram, setIsTelegram] = useState(false);
+  const [isInIframe, setIsInIframe] = useState(false);
   const [browserType, setBrowserType] = useState<BrowserEnvironment>("other");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    // Check if running inside iframe (e.g. AI Studio preview, embed)
+    const inIframe = window.self !== window.top;
+    setIsInIframe(inIframe);
 
     const ua = window.navigator.userAgent || "";
     const uaLower = ua.toLowerCase();
@@ -88,23 +123,41 @@ export function usePWAInstall(): PWAInstallState {
     }
 
     // 4. Detect standalone mode (already installed as PWA)
-    // NOTE: Inside iframes or in-app webviews, display-mode may be misinterpreted, so check !inApp
+    // NOTE: Inside iframes or in-app webviews, display-mode may be misinterpreted
     const isStandalone =
       !inApp &&
+      !inIframe &&
       (window.matchMedia("(display-mode: standalone)").matches ||
         (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
         document.referrer.includes("android-app://"));
     setIsInstalled(isStandalone);
 
-    // 5. Global prompt capturing
+    // Check if global prompt is already available
+    if (window.__pwaDeferredPrompt) {
+      setDeferredPrompt(window.__pwaDeferredPrompt);
+    }
+
+    // Register listener for prompt updates
+    const promptCallback = (evt: BeforeInstallPromptEvent | null) => {
+      setDeferredPrompt(evt);
+    };
+
+    if (!window.__pwaPromptListeners) {
+      window.__pwaPromptListeners = [];
+    }
+    window.__pwaPromptListeners.push(promptCallback);
+
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
+      const p = e as BeforeInstallPromptEvent;
+      window.__pwaDeferredPrompt = p;
+      setDeferredPrompt(p);
     };
 
     const handleAppInstalled = () => {
       setIsInstalled(true);
       setDeferredPrompt(null);
+      window.__pwaDeferredPrompt = null;
     };
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
@@ -113,25 +166,42 @@ export function usePWAInstall(): PWAInstallState {
     return () => {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
       window.removeEventListener("appinstalled", handleAppInstalled);
+      if (window.__pwaPromptListeners) {
+        window.__pwaPromptListeners = window.__pwaPromptListeners.filter((cb) => cb !== promptCallback);
+      }
     };
   }, []);
 
-  const install = async (): Promise<boolean> => {
-    if (!deferredPrompt) {
-      return false;
+  const install = async (): Promise<"accepted" | "dismissed" | "failed" | "not_supported"> => {
+    const promptEvent = deferredPrompt || (typeof window !== "undefined" ? window.__pwaDeferredPrompt : null);
+    if (!promptEvent) {
+      return "not_supported";
     }
+
     try {
-      await deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === "accepted") {
-        setIsInstalled(true);
-        setDeferredPrompt(null);
-        return true;
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice;
+
+      // Always clear promptEvent so it cannot be reused (calling prompt() twice throws DOMException)
+      setDeferredPrompt(null);
+      if (typeof window !== "undefined") {
+        window.__pwaDeferredPrompt = null;
+        window.__pwaPromptListeners?.forEach((cb) => cb(null));
       }
+
+      if (choice.outcome === "accepted") {
+        setIsInstalled(true);
+        return "accepted";
+      }
+      return "dismissed";
     } catch (err) {
       console.warn("PWA prompt error:", err);
+      setDeferredPrompt(null);
+      if (typeof window !== "undefined") {
+        window.__pwaDeferredPrompt = null;
+      }
+      return "failed";
     }
-    return false;
   };
 
   const openInExternalBrowser = () => {
@@ -139,7 +209,6 @@ export function usePWAInstall(): PWAInstallState {
     const currentUrl = window.location.href;
 
     if (isAndroid) {
-      // Android Intent to open directly in Google Chrome
       try {
         const cleanHost = window.location.host;
         const cleanPath = window.location.pathname + window.location.search;
@@ -147,15 +216,23 @@ export function usePWAInstall(): PWAInstallState {
         window.location.href = intentUrl;
         return;
       } catch {
-        // Fallback
+        // Fallback below
       }
     }
 
-    // Standard external window trigger
     try {
-      window.open(currentUrl, "_system");
-    } catch {
       window.open(currentUrl, "_blank");
+    } catch {
+      window.location.href = currentUrl;
+    }
+  };
+
+  const openInNewTab = () => {
+    if (typeof window === "undefined") return;
+    try {
+      window.open(window.location.href, "_blank");
+    } catch {
+      window.location.href = window.location.href;
     }
   };
 
@@ -167,7 +244,6 @@ export function usePWAInstall(): PWAInstallState {
         await navigator.clipboard.writeText(url);
         return true;
       }
-      // Fallback
       const input = document.createElement("input");
       input.value = url;
       document.body.appendChild(input);
@@ -181,15 +257,17 @@ export function usePWAInstall(): PWAInstallState {
   };
 
   return {
-    isInstallable: !!deferredPrompt,
+    isInstallable: !!deferredPrompt || (typeof window !== "undefined" && !!window.__pwaDeferredPrompt),
     isInstalled,
     isIOS,
     isAndroid,
     isInAppBrowser,
     isTelegram,
+    isInIframe,
     browserType,
     install,
     openInExternalBrowser,
+    openInNewTab,
     copyAppUrl,
   };
 }
