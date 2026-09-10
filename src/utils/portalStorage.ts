@@ -341,6 +341,14 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
         })
       );
     }
+    // Clear any previous revocation record on server
+    try {
+      fetch("/api/account-activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode: account.studentBarcode }),
+      }).catch(() => {});
+    } catch {}
   }
 
   // If status is disabled or deleted, immediately broadcast revocation to log out parent device
@@ -374,6 +382,14 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
         })
       );
     }
+    // Fast server push to trigger immediate mobile logout
+    try {
+      fetch("/api/account-revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode: account.studentBarcode, reason: reasonText }),
+      }).catch(() => {});
+    } catch {}
   }
 
   // Reliable cloud persistence tied to Firestore (Executed in parallel without blocking)
@@ -417,66 +433,102 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
   const nowIso = new Date().toISOString();
   const revokeReason = "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
 
+  const allBarcodesToRevoke = new Set<string>([cleanBarcode]);
   if (existing) {
     existing.status = "deleted";
     existing.deletedAt = nowIso;
     existing.reason = revokeReason;
+    if (existing.studentBarcode) allBarcodesToRevoke.add(String(existing.studentBarcode).trim());
+    if (Array.isArray(existing.linkedBarcodes)) {
+      existing.linkedBarcodes.forEach((b) => allBarcodesToRevoke.add(String(b).trim()));
+    }
   }
+
+  // Also check if any account in local list has this barcode linked
+  for (const [b, acc] of Object.entries(accounts)) {
+    if (acc?.linkedBarcodes?.includes(cleanBarcode) || acc?.studentBarcode === cleanBarcode) {
+      allBarcodesToRevoke.add(String(b).trim());
+      if (acc.studentBarcode) allBarcodesToRevoke.add(String(acc.studentBarcode).trim());
+      delete accounts[b];
+    }
+  }
+
   delete accounts[cleanBarcode];
   saveLocalParentAccounts(accounts);
 
   // If local active session matches deleted account, clear session immediately
   const curSess = getSavedPortalSession();
-  if (curSess?.role === "parent" && String(curSess.account?.studentBarcode).trim() === cleanBarcode) {
+  if (
+    curSess?.role === "parent" &&
+    (allBarcodesToRevoke.has(String(curSess.barcode).trim()) ||
+      allBarcodesToRevoke.has(String(curSess.account?.studentBarcode).trim()))
+  ) {
     savePortalSession(null);
+    try {
+      localStorage.removeItem(LS_PORTAL_SESSION);
+    } catch {}
   }
 
-  // 1. Broadcast revocation immediately across same device tabs
-  accountEventsBus?.postMessage({
-    type: "ACCOUNT_REVOKED",
-    barcode: cleanBarcode,
-    reason: revokeReason,
-    revokedAt: nowIso,
-  });
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(
-      new CustomEvent("eman_account_revoked", {
-        detail: {
-          barcode: cleanBarcode,
-          reason: revokeReason,
-          revokedAt: nowIso,
-        },
-      })
-    );
+  // 1. Broadcast revocation immediately across same device tabs & local window
+  for (const b of allBarcodesToRevoke) {
+    accountEventsBus?.postMessage({
+      type: "ACCOUNT_REVOKED",
+      barcode: b,
+      reason: revokeReason,
+      revokedAt: nowIso,
+    });
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("eman_account_revoked", {
+          detail: {
+            barcode: b,
+            reason: revokeReason,
+            revokedAt: nowIso,
+          },
+        })
+      );
+    }
+
+    // 2. High-speed Direct Server Broadcast (Sub-50ms) to trigger immediate mobile logout
+    try {
+      fetch("/api/account-revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode: b, reason: revokeReason }),
+      }).catch(() => {});
+    } catch {}
   }
 
-  // 2. Multi-channel cloud revocation & deletion to guarantee remote mobile logout
+  // 3. Multi-channel cloud revocation & deletion to guarantee remote mobile logout on Firestore
   try {
-    await ensureFirebaseAuth();
-    if (db) {
-      await Promise.all([
-        // Update document status to deleted so active Firestore snapshot listeners trigger immediately
+    const writes: Promise<any>[] = [
+      setDoc(
+        doc(db, "system_state", "portal_accounts_registry"),
+        { accounts, updatedAt: nowIso },
+        { merge: true }
+      ),
+    ];
+
+    for (const b of allBarcodesToRevoke) {
+      writes.push(
         setDoc(
-          doc(db, "parent_accounts", cleanBarcode),
-          { studentBarcode: cleanBarcode, status: "deleted", deletedAt: nowIso, reason: revokeReason },
+          doc(db, "parent_accounts", b),
+          { studentBarcode: b, status: "deleted", deletedAt: nowIso, reason: revokeReason },
           { merge: true }
-        ),
-        // Register in dedicated account_revocations collection so it acts as an explicit tombstone
-        setDoc(doc(db, "account_revocations", cleanBarcode), {
-          barcode: cleanBarcode,
+        )
+      );
+      writes.push(
+        setDoc(doc(db, "account_revocations", b), {
+          barcode: b,
           revoked: true,
           reason: revokeReason,
           revokedAt: nowIso,
           timestamp: Date.now(),
-        }),
-        // Update the cloud accounts registry
-        setDoc(
-          doc(db, "system_state", "portal_accounts_registry"),
-          { accounts, updatedAt: nowIso },
-          { merge: true }
-        ),
-      ]);
+        })
+      );
     }
+
+    await Promise.all(writes);
   } catch (err) {
     console.warn("Cloud parent account delete notice:", err);
   }
@@ -708,6 +760,9 @@ export function subscribeToParentAccountLiveStatus(
 
     // Purge local session instantly so browser / refresh cannot resurrect it
     savePortalSession(null);
+    try {
+      localStorage.removeItem(LS_PORTAL_SESSION);
+    } catch {}
 
     // Fire window event for local components
     if (typeof window !== "undefined") {
@@ -724,7 +779,30 @@ export function subscribeToParentAccountLiveStatus(
     onRevoked(reason);
   };
 
-  // 1. BroadcastChannel listener (same device / multi-tab)
+  // 1. Direct Server-Sent Events (SSE) Stream: sub-50ms instant remote push
+  let eventSource: EventSource | null = null;
+  if (typeof window !== "undefined" && "EventSource" in window) {
+    try {
+      eventSource = new EventSource("/api/account-events-stream");
+      eventSource.onmessage = (event) => {
+        if (isCancelled || hasFiredRevocation) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data?.type === "ACCOUNT_REVOKED") {
+            const revBarcode = String(data.barcode).trim();
+            if (revBarcode === targetBarcode) {
+              triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            }
+          }
+        } catch {}
+      };
+      eventSource.onerror = () => {
+        // SSE auto-reconnects
+      };
+    } catch {}
+  }
+
+  // 2. BroadcastChannel listener (same device / multi-tab)
   const handleBusMessage = (ev: MessageEvent) => {
     if (String(ev.data?.barcode).trim() !== targetBarcode) return;
     if (ev.data?.type === "ACCOUNT_REVOKED") {
@@ -733,7 +811,7 @@ export function subscribeToParentAccountLiveStatus(
   };
   accountEventsBus?.addEventListener("message", handleBusMessage);
 
-  // 2. Window event listener (same tab)
+  // 3. Window event listener (same tab)
   const handleRevokeWindowEvent = (ev: Event) => {
     const customEv = ev as CustomEvent;
     const evBarcode = String(customEv.detail?.barcode || "").trim();
@@ -748,7 +826,7 @@ export function subscribeToParentAccountLiveStatus(
     window.addEventListener("eman_account_revoked", handleRevokeWindowEvent);
   }
 
-  // 3. Storage event listener (cross-tab LocalStorage modification)
+  // 4. Storage event listener (cross-tab LocalStorage modification)
   const handleStorageEvent = (ev: StorageEvent) => {
     if (ev.key === LS_PARENT_ACCOUNTS && ev.newValue) {
       try {
@@ -766,86 +844,91 @@ export function subscribeToParentAccountLiveStatus(
     window.addEventListener("storage", handleStorageEvent);
   }
 
-  // 4. Firestore Realtime Listeners for remote admin actions (PC to mobile)
+  // 5. Firestore Realtime Listeners for remote admin actions (PC to mobile)
   let unsubscribeDoc: (() => void) | null = null;
   let unsubscribeRevocations: (() => void) | null = null;
   let unsubscribeRegistry: (() => void) | null = null;
 
-  ensureFirebaseAuth()
-    .then(() => {
-      if (isCancelled || !db) return;
-      try {
-        // A. Listen directly to parent_accounts/{barcode}
-        unsubscribeDoc = onSnapshot(
-          doc(db, "parent_accounts", targetBarcode),
-          (snap) => {
-            if (isCancelled) return;
-            if (!snap.exists()) {
-              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-              return;
+  try {
+    if (db) {
+      // A. Listen directly to parent_accounts/{barcode}
+      unsubscribeDoc = onSnapshot(
+        doc(db, "parent_accounts", targetBarcode),
+        (snap) => {
+          if (isCancelled || hasFiredRevocation) return;
+          if (!snap.exists()) {
+            triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            return;
+          }
+          const data = snap.data() as ParentAccount;
+          if (data) {
+            if (data.status === "deleted") {
+              triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            } else if (data.status === "disabled") {
+              triggerRevoke(data.reason || "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
             }
-            const data = snap.data() as ParentAccount;
-            if (data) {
-              if (data.status === "deleted") {
-                triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-              } else if (data.status === "disabled") {
-                triggerRevoke(data.reason || "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+          }
+        },
+        () => {}
+      );
+
+      // B. Listen to explicit account_revocations tombstone stream
+      unsubscribeRevocations = onSnapshot(
+        doc(db, "account_revocations", targetBarcode),
+        (snap) => {
+          if (isCancelled || hasFiredRevocation) return;
+          if (snap.exists()) {
+            const revData = snap.data();
+            if (revData?.revoked) {
+              triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            }
+          }
+        },
+        () => {}
+      );
+
+      // C. Listen to cloud registry updates
+      unsubscribeRegistry = onSnapshot(
+        doc(db, "system_state", "portal_accounts_registry"),
+        (snap) => {
+          if (isCancelled || hasFiredRevocation) return;
+          if (snap.exists()) {
+            const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
+            if (regData) {
+              const acc = regData[targetBarcode];
+              if (!acc || acc.status === "deleted") {
+                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              } else if (acc.status === "disabled") {
+                triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
               }
             }
-          },
-          (err) => {
-            console.warn("Firestore parent live listener notice:", err);
           }
-        );
+        },
+        () => {}
+      );
+    }
+  } catch (e) {
+    console.warn("Notice attaching Firestore snapshot listener:", e);
+  }
 
-        // B. Listen to explicit account_revocations tombstone stream
-        unsubscribeRevocations = onSnapshot(
-          doc(db, "account_revocations", targetBarcode),
-          (snap) => {
-            if (isCancelled) return;
-            if (snap.exists()) {
-              const revData = snap.data();
-              if (revData?.revoked) {
-                triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-              }
-            }
-          },
-          (err) => {
-            console.warn("Firestore revocations listener notice:", err);
-          }
-        );
-
-        // C. Listen to cloud registry updates
-        unsubscribeRegistry = onSnapshot(
-          doc(db, "system_state", "portal_accounts_registry"),
-          (snap) => {
-            if (isCancelled) return;
-            if (snap.exists()) {
-              const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
-              if (regData) {
-                const acc = regData[targetBarcode];
-                if (!acc || acc.status === "deleted") {
-                  triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
-                } else if (acc.status === "disabled") {
-                  triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-                }
-              }
-            }
-          },
-          (err) => {
-            console.warn("Firestore registry listener notice:", err);
-          }
-        );
-      } catch (e) {
-        console.warn("Notice attaching Firestore snapshot listener:", e);
-      }
-    })
-    .catch(() => {});
-
-  // 5. Periodic check and window focus/visibility/pageshow handler (mobile phone wakes up from lockscreen / background)
+  // 6. Fast server check & heartbeat (checks every 1.5s for instant phone logout)
   const checkStatus = async () => {
     if (isCancelled || hasFiredRevocation) return;
     try {
+      // Direct server status check (lightweight HTTP JSON call, ~10ms)
+      try {
+        const resp = await fetch(`/api/account-status?barcode=${encodeURIComponent(targetBarcode)}`, {
+          cache: "no-store",
+        });
+        if (resp.ok) {
+          const json = await resp.json();
+          if (json?.revoked) {
+            triggerRevoke(json.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+            return;
+          }
+        }
+      } catch {}
+
       // LocalStorage check
       const localAccs = getLocalParentAccounts();
       const localAcc = localAccs[targetBarcode];
@@ -854,10 +937,9 @@ export function subscribeToParentAccountLiveStatus(
         return;
       }
 
-      await ensureFirebaseAuth();
       if (!db || isCancelled || hasFiredRevocation) return;
 
-      // 1. Direct doc check in Firestore
+      // Firestore direct doc check
       const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
       if (!snap.exists()) {
         triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
@@ -874,7 +956,7 @@ export function subscribeToParentAccountLiveStatus(
         }
       }
 
-      // 2. Direct tombstone check in account_revocations
+      // Direct tombstone check in account_revocations
       const revSnap = await getDoc(doc(db, "account_revocations", targetBarcode));
       if (revSnap.exists() && revSnap.data()?.revoked) {
         triggerRevoke(revSnap.data()?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
@@ -895,11 +977,17 @@ export function subscribeToParentAccountLiveStatus(
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
 
-  // Active 2.5-second heartbeat for instant automatic phone logout
-  const pollInterval = setInterval(checkStatus, 2500);
+  // Active 1.5-second heartbeat for instant automatic phone logout
+  const pollInterval = setInterval(checkStatus, 1500);
+
+  // Run initial check immediately
+  checkStatus();
 
   return () => {
     isCancelled = true;
+    if (eventSource) {
+      eventSource.close();
+    }
     accountEventsBus?.removeEventListener("message", handleBusMessage);
     if (typeof window !== "undefined") {
       window.removeEventListener("eman_account_revoked", handleRevokeWindowEvent);

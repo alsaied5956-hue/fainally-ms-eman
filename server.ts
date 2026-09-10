@@ -54,6 +54,65 @@ try {
 }
 
 // ----------------------------------------------------
+// ACCOUNT REVOCATION & REALTIME SYNC ENGINE
+// ----------------------------------------------------
+interface RevokedAccountRecord {
+  barcode: string;
+  reason: string;
+  revokedAt: number;
+}
+
+const REVOKED_FILE = path.join(process.cwd(), ".revoked_accounts_store.json");
+const revokedAccountsCache = new Map<string, RevokedAccountRecord>();
+const sseClients = new Set<express.Response>();
+
+function loadRevokedAccounts(): void {
+  try {
+    if (fs.existsSync(REVOKED_FILE)) {
+      const content = fs.readFileSync(REVOKED_FILE, "utf-8");
+      const list = JSON.parse(content) as RevokedAccountRecord[];
+      if (Array.isArray(list)) {
+        list.forEach((item) => {
+          if (item?.barcode) {
+            revokedAccountsCache.set(String(item.barcode).trim(), item);
+          }
+        });
+        console.log(`[Revocation] Loaded ${revokedAccountsCache.size} revoked accounts from store.`);
+      }
+    }
+  } catch (err) {
+    console.warn("Could not load revoked accounts file:", err);
+  }
+}
+
+function persistRevokedAccounts(): void {
+  try {
+    const list = Array.from(revokedAccountsCache.values());
+    fs.writeFileSync(REVOKED_FILE, JSON.stringify(list, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("Could not save revoked accounts file:", err);
+  }
+}
+
+function broadcastAccountEvent(eventData: {
+  type: string;
+  barcode: string;
+  reason?: string;
+  timestamp: number;
+}) {
+  const payload = `data: ${JSON.stringify(eventData)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+loadRevokedAccounts();
+
+// ----------------------------------------------------
 // SUBSCRIPTIONS STORAGE (IN-MEMORY + FILE BACKUP)
 // ----------------------------------------------------
 interface StoredSubscription {
@@ -205,6 +264,123 @@ app.post("/api/push-subscribe", (req, res) => {
     console.error("push-subscribe error:", err);
     return res.status(500).json({ error: err.message || "Failed to save subscription" });
   }
+});
+
+// 4. Record account revocation and broadcast to connected phones immediately (Sub-50ms latency)
+app.post("/api/account-revoke", (req, res) => {
+  try {
+    const { barcode, reason } = req.body;
+    if (!barcode) {
+      return res.status(400).json({ error: "Barcode is required" });
+    }
+    const cleanBarcode = String(barcode).trim();
+    const reasonText = reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
+    const item: RevokedAccountRecord = {
+      barcode: cleanBarcode,
+      reason: reasonText,
+      revokedAt: Date.now(),
+    };
+
+    revokedAccountsCache.set(cleanBarcode, item);
+    persistRevokedAccounts();
+
+    console.log(`[Revocation Engine] Account revoked: ${cleanBarcode}. Broadcasting to ${sseClients.size} SSE connections.`);
+
+    // Instant SSE broadcast to all active mobile phone sessions
+    broadcastAccountEvent({
+      type: "ACCOUNT_REVOKED",
+      barcode: cleanBarcode,
+      reason: reasonText,
+      timestamp: Date.now(),
+    });
+
+    // Also attempt WebPush notification to wake up device if phone is asleep
+    sendWebPushToTargets({
+      targetUserIds: [cleanBarcode],
+      title: "إشعار من إدارة المنظومة",
+      body: reasonText,
+      url: "/",
+      tag: `revoke-${cleanBarcode}`,
+      type: "revocation",
+    }).catch(() => {});
+
+    return res.json({ success: true, barcode: cleanBarcode });
+  } catch (err: any) {
+    console.error("account-revoke error:", err);
+    return res.status(500).json({ error: err.message || "Failed to revoke account" });
+  }
+});
+
+// 5. Clear revocation when account is re-activated or newly registered
+app.post("/api/account-activate", (req, res) => {
+  try {
+    const { barcode } = req.body;
+    if (!barcode) {
+      return res.status(400).json({ error: "Barcode is required" });
+    }
+    const cleanBarcode = String(barcode).trim();
+    revokedAccountsCache.delete(cleanBarcode);
+    persistRevokedAccounts();
+
+    console.log(`[Revocation Engine] Account activated/unrevoked: ${cleanBarcode}.`);
+
+    broadcastAccountEvent({
+      type: "ACCOUNT_ACTIVATED",
+      barcode: cleanBarcode,
+      timestamp: Date.now(),
+    });
+
+    return res.json({ success: true, barcode: cleanBarcode });
+  } catch (err: any) {
+    console.error("account-activate error:", err);
+    return res.status(500).json({ error: err.message || "Failed to activate account" });
+  }
+});
+
+// 6. Fast account revocation status check (used by phone heartbeat & wakeup)
+app.get("/api/account-status", (req, res) => {
+  const barcode = String(req.query.barcode || "").trim();
+  if (!barcode) {
+    return res.json({ revoked: false });
+  }
+  const isRevoked = revokedAccountsCache.has(barcode);
+  const revInfo = revokedAccountsCache.get(barcode);
+  return res.json({
+    revoked: !!isRevoked,
+    reason: revInfo?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.",
+    revokedAt: revInfo?.revokedAt || null,
+  });
+});
+
+// 7. Realtime Server-Sent Events (SSE) stream for instant mobile push without polling
+app.get("/api/account-events-stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  // Initial connect handshake
+  res.write(`data: ${JSON.stringify({ type: "CONNECTED", timestamp: Date.now() })}\n\n`);
+
+  sseClients.add(res);
+  console.log(`[Revocation SSE] New client connected. Total clients: ${sseClients.size}`);
+
+  // Keep-alive ping every 15s to keep phone cellular/WiFi sockets alive
+  const pingInterval = setInterval(() => {
+    try {
+      res.write(`: ping\n\n`);
+    } catch {
+      clearInterval(pingInterval);
+      sseClients.delete(res);
+    }
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(pingInterval);
+    sseClients.delete(res);
+    console.log(`[Revocation SSE] Client disconnected. Remaining: ${sseClients.size}`);
+  });
 });
 
 // ----------------------------------------------------

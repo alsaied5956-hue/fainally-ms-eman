@@ -147,7 +147,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       const customEv = ev as CustomEvent;
       const myBarcode = String(account.studentBarcode).trim();
       const targetBarcode = String(customEv.detail?.barcode || "").trim();
-      if (!targetBarcode || targetBarcode === myBarcode) {
+      const linked = Array.isArray(account.linkedBarcodes) ? account.linkedBarcodes.map(String) : [];
+      if (!targetBarcode || targetBarcode === myBarcode || linked.includes(targetBarcode)) {
         onLogout();
       }
     };
