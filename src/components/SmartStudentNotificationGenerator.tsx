@@ -1,8 +1,12 @@
 import React, { useState, useMemo } from "react";
 import { Student, PaymentRecord, PlatformMessageType } from "../types";
-import { getTodayKey, getCurrentMonthKey } from "../utils/helpers";
+import { getTodayKey, getCurrentMonthKey, openWhatsApp } from "../utils/helpers";
 import { enqueuePlatformMessage } from "../utils/storage";
 import { StudentSearchBox } from "./StudentSearchBox";
+import {
+  requestSmartNotification,
+  SmartNotificationResult,
+} from "../services/geminiService";
 import {
   Sparkles,
   Search,
@@ -21,6 +25,10 @@ import {
   QrCode,
   Layers,
   ChevronRight,
+  Bot,
+  RefreshCw,
+  AlertCircle,
+  MessageCircle,
 } from "lucide-react";
 
 export interface GeneratedStudentNotifications {
@@ -187,7 +195,10 @@ export const SmartStudentNotificationGenerator: React.FC<
   const [barcodeInput, setBarcodeInput] = useState("");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [sentKey, setSentKey] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"all" | "report">("all");
+  const [activeTab, setActiveTab] = useState<"all" | "report" | "gemini_ai">("all");
+  const [geminiResult, setGeminiResult] = useState<SmartNotificationResult | null>(null);
+  const [isGeneratingGemini, setIsGeneratingGemini] = useState<boolean>(false);
+  const [geminiTone, setGeminiTone] = useState<"encouraging" | "formal" | "urgent">("encouraging");
 
   const generated = useMemo(() => {
     if (!selectedStudent) return null;
@@ -197,6 +208,29 @@ export const SmartStudentNotificationGenerator: React.FC<
       payments
     );
   }, [selectedStudent, attendanceToday, payments]);
+
+  const handleGenerateWithGemini = async () => {
+    if (!selectedStudent) return;
+    setIsGeneratingGemini(true);
+    try {
+      const res = await requestSmartNotification({
+        studentName: selectedStudent.name,
+        studentBarcode: selectedStudent.barcode,
+        grade: selectedStudent.groupGrade,
+        attendanceStatus: generated?.parsedValues.attendanceStatusToday || "حاضر في الموعد",
+        lastExamScore: generated?.parsedValues.score ? `${generated.parsedValues.score}/${generated.parsedValues.maxScore}` : undefined,
+        examTitle: generated?.parsedValues.examName,
+        homeworkStatus: generated?.parsedValues.homeworkStatus,
+        notes: selectedStudent.notes,
+        tone: geminiTone,
+      });
+      setGeminiResult(res);
+    } catch (err) {
+      console.warn("Gemini generation error:", err);
+    } finally {
+      setIsGeneratingGemini(false);
+    }
+  };
 
   const handleBarcodeSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -371,6 +405,23 @@ export const SmartStudentNotificationGenerator: React.FC<
           >
             التقرير الشامل 📊
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("gemini_ai");
+              if (!geminiResult && selectedStudent) {
+                handleGenerateWithGemini();
+              }
+            }}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeTab === "gemini_ai"
+                ? "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-600/30 ring-1 ring-purple-400/50"
+                : "text-purple-300 hover:text-white bg-purple-950/40 border border-purple-800/40"
+            }`}
+          >
+            <Bot className="w-3.5 h-3.5 text-amber-300" />
+            <span>توليد ذكي (Gemini AI) ✨</span>
+          </button>
         </div>
       </div>
 
@@ -452,7 +503,245 @@ export const SmartStudentNotificationGenerator: React.FC<
 
       {/* Generated Cards Container */}
       {selectedStudent && generated ? (
-        activeTab === "report" ? (
+        activeTab === "gemini_ai" ? (
+          /* Gemini AI Interactive Generation Section */
+          <div className="space-y-6">
+            <div className="p-6 rounded-3xl bg-gradient-to-br from-purple-950/40 via-indigo-950/30 to-slate-900 border border-purple-500/30 shadow-xl space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-purple-500/20">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center text-purple-300 shadow-sm">
+                    <Bot className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-base font-extrabold text-white flex items-center gap-2">
+                      <span>المولد التربوي الذكي للأستاذة إيمان (Gemini AI)</span>
+                      {geminiResult && (
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold border ${
+                            geminiResult.source === "gemini"
+                              ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                              : geminiResult.source === "cache"
+                              ? "bg-sky-500/20 text-sky-300 border-sky-500/30"
+                              : "bg-amber-500/20 text-amber-300 border-amber-500/30"
+                          }`}
+                        >
+                          {geminiResult.source === "gemini"
+                            ? "متصل بالذكاء الاصطناعي ✓"
+                            : geminiResult.source === "cache"
+                            ? "ذاكرة معزولة فائقة السرعة ⚡"
+                            : "وضع احتياطي آمن 🛡️"}
+                        </span>
+                      )}
+                    </h4>
+                    <p className="text-xs text-purple-200/80">
+                      معالجة غير متزامنة مع حماية ضد الـ Rate Limits وعزل جلسات الأجهزة المتعددة.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Tone Selector & Trigger Button */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-xl border border-purple-900/40 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setGeminiTone("encouraging")}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        geminiTone === "encouraging"
+                          ? "bg-purple-600 text-white shadow-sm"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      تشجيعي ✨
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGeminiTone("formal")}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        geminiTone === "formal"
+                          ? "bg-purple-600 text-white shadow-sm"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      رسمي 📋
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGeminiTone("urgent")}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        geminiTone === "urgent"
+                          ? "bg-rose-600 text-white shadow-sm"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      عاجل 🚨
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleGenerateWithGemini}
+                    disabled={isGeneratingGemini}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-600/30 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    {isGeneratingGemini ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-300" />
+                        <span>جاري المعالجة والاتصال...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        <span>توليد / تحديث الرسائل</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Loading State Skeleton */}
+              {isGeneratingGemini && (
+                <div className="p-8 text-center space-y-3 bg-slate-950/60 rounded-2xl border border-purple-500/20">
+                  <div className="inline-flex p-3 rounded-2xl bg-purple-600/20 text-purple-300 animate-pulse">
+                    <Bot className="w-8 h-8" />
+                  </div>
+                  <p className="text-sm font-bold text-white">
+                    جاري صياغة الرسالة التربوية بالذكاء الاصطناعي (Gemini)...
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    النظام يدير رتل المهام المتزامنة والتراجع الأسي لتفادي أي أخطاء بمعدل الاستخدام (Rate Limit).
+                  </p>
+                </div>
+              )}
+
+              {/* Results Cards */}
+              {!isGeneratingGemini && geminiResult && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Parent Message Card */}
+                  <div className="p-5 rounded-2xl bg-slate-950/80 border border-purple-500/30 flex flex-col justify-between gap-4 shadow-lg">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                      <div className="flex items-center gap-2 text-purple-300 font-extrabold text-sm">
+                        <MessageCircle className="w-4 h-4 text-purple-400" />
+                        <span>رسالة ولي الأمر الذكية</span>
+                        <span className="px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 text-[10px] font-bold">
+                          {geminiResult.recommendedTag}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleCopy("gemini_parent", geminiResult.parentMessage)}
+                          className="px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-[11px] font-bold border border-slate-800 flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          {copiedKey === "gemini_parent" ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-300">تم</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>نسخ</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openWhatsApp(
+                              selectedStudent.parentPhone || selectedStudent.phone || "",
+                              geminiResult.parentMessage
+                            )
+                          }
+                          className="px-2.5 py-1 rounded-xl bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          <Send className="w-3 h-3 text-emerald-300" />
+                          <span>واتساب</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handlePublishPlatformNotification(
+                              "gemini_parent",
+                              `إشعار متابعة ذكي: ${selectedStudent.name}`,
+                              geminiResult.parentMessage,
+                              "عام"
+                            )
+                          }
+                          className="px-2.5 py-1 rounded-xl bg-indigo-600/40 hover:bg-indigo-600/70 border border-indigo-500/40 text-indigo-200 text-[11px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          {sentKey === "gemini_parent" ? (
+                            <>
+                              <Check className="w-3 h-3 text-amber-300" />
+                              <span>تم النشر ✓</span>
+                            </>
+                          ) : (
+                            <>
+                              <Send className="w-3 h-3 text-amber-400" />
+                              <span>نشر بالمنصة</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-200 text-xs font-mono whitespace-pre-wrap leading-relaxed">
+                      {geminiResult.parentMessage}
+                    </div>
+
+                    <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>المطلوب: <strong className="text-amber-300">{geminiResult.actionRequired}</strong></span>
+                    </div>
+                  </div>
+
+                  {/* Student Motivational & Academic Summary Card */}
+                  <div className="space-y-4">
+                    {/* Student Note */}
+                    <div className="p-5 rounded-2xl bg-slate-950/80 border border-sky-500/30 space-y-3 shadow-lg">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                        <div className="flex items-center gap-2 text-sky-300 font-extrabold text-sm">
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                          <span>رسالة تحفيزية للرياضيات موجهة للطالب</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy("gemini_student", geminiResult.studentMotivationalNote)}
+                          className="px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-[11px] font-bold border border-slate-800 flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          {copiedKey === "gemini_student" ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span className="text-emerald-300">تم</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>نسخ</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-200 font-sans leading-relaxed p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                        {geminiResult.studentMotivationalNote}
+                      </p>
+                    </div>
+
+                    {/* Academic Summary */}
+                    <div className="p-5 rounded-2xl bg-slate-950/80 border border-indigo-500/30 space-y-2 shadow-lg">
+                      <div className="flex items-center gap-2 text-indigo-300 font-extrabold text-sm pb-2 border-b border-slate-800">
+                        <Award className="w-4 h-4 text-indigo-400" />
+                        <span>التشخيص الأكاديمي المختصر</span>
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        {geminiResult.academicSummary}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : activeTab === "report" ? (
           /* Single Comprehensive Report Display */
           <div className="p-6 rounded-3xl bg-indigo-950/30 border border-indigo-500/40 space-y-4">
             <div className="flex items-center justify-between">

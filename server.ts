@@ -15,6 +15,14 @@ import {
   onSnapshot,
 } from "firebase/firestore";
 import firebaseConfig from "./firebase-applet-config.json";
+import {
+  generateSmartStudentNotification,
+  analyzeStudentAcademicStatus,
+  geminiConcurrencyQueue,
+  getGeminiClient,
+  executeWithRetry,
+  cleanAndParseJSON,
+} from "./server/geminiService";
 
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 const db = getFirestore(fbApp, (firebaseConfig as any).firestoreDatabaseId || undefined);
@@ -207,6 +215,164 @@ syncSubscriptionsFromFirestore().catch(() => {});
 // 1. Health check
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", subscriptions: subscriptionsCache.size, timestamp: Date.now() });
+});
+
+// ----------------------------------------------------
+// GEMINI API RESILIENT SERVICES & ASYNC QUEUED ROUTES
+// ----------------------------------------------------
+
+// Gemini status and queue telemetry
+app.get("/api/gemini/status", (_req, res) => {
+  const isKeyConfigured = !!process.env.GEMINI_API_KEY;
+  const queueStats = geminiConcurrencyQueue.getStats();
+  res.json({
+    status: "ok",
+    apiKeyConfigured: isKeyConfigured,
+    model: "gemini-3.8-flash",
+    concurrency: queueStats,
+    timestamp: Date.now(),
+  });
+});
+
+// Resilient Smart Student Notification Generator (Gemini + Exponential Backoff)
+app.post("/api/gemini/smart-notification", async (req, res) => {
+  try {
+    const sessionId = (req.headers["x-session-id"] as string) || req.body.sessionId || "default_session";
+    const deviceId = (req.headers["x-device-id"] as string) || req.body.deviceId || "default_device";
+
+    const {
+      studentName,
+      studentBarcode,
+      grade,
+      attendanceStatus,
+      lastExamScore,
+      examTitle,
+      homeworkStatus,
+      notes,
+      tone,
+    } = req.body;
+
+    if (!studentName || !studentBarcode) {
+      return res.status(400).json({ error: "studentName and studentBarcode are required" });
+    }
+
+    const result = await generateSmartStudentNotification({
+      studentName,
+      studentBarcode,
+      grade: grade || "المرحلة الدراسية",
+      attendanceStatus,
+      lastExamScore,
+      examTitle,
+      homeworkStatus,
+      notes,
+      tone: tone || "encouraging",
+      sessionId,
+      deviceId,
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[API Error] /api/gemini/smart-notification failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to generate notification",
+      fallbackUsed: true,
+    });
+  }
+});
+
+// Academic Performance & Early Warning Diagnostic Analysis
+app.post("/api/gemini/analyze-student", async (req, res) => {
+  try {
+    const sessionId = (req.headers["x-session-id"] as string) || req.body.sessionId || "default_session";
+    const {
+      studentName,
+      studentBarcode,
+      grade,
+      absenceRate,
+      totalAbsentDays,
+      examAverage,
+      recentScores,
+      isUnpaid,
+      behaviorNotes,
+    } = req.body;
+
+    if (!studentName || !studentBarcode) {
+      return res.status(400).json({ error: "studentName and studentBarcode are required" });
+    }
+
+    const result = await analyzeStudentAcademicStatus({
+      studentName,
+      studentBarcode,
+      grade: grade || "المرحلة الدراسية",
+      absenceRate: Number(absenceRate) || 0,
+      totalAbsentDays: Number(totalAbsentDays) || 0,
+      examAverage: Number(examAverage) || 0,
+      recentScores: Array.isArray(recentScores) ? recentScores.map(Number) : [],
+      isUnpaid: !!isUnpaid,
+      behaviorNotes,
+      sessionId,
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[API Error] /api/gemini/analyze-student failed:", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to analyze student",
+      fallbackUsed: true,
+    });
+  }
+});
+
+// General Resilient Gemini Structured Generation Endpoint
+app.post("/api/gemini/generate", async (req, res) => {
+  try {
+    const { prompt, systemInstruction, temperature, fallbackResponse } = req.body;
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "Prompt is required" });
+    }
+
+    const client = getGeminiClient();
+    if (!client) {
+      return res.json({
+        success: true,
+        source: "fallback",
+        text: fallbackResponse || "تم حفظ البيانات بنجاح (الخدمة الذكية تعمل بالوضع الاحتياطي).",
+      });
+    }
+
+    const result = await geminiConcurrencyQueue.enqueue(async () => {
+      return await executeWithRetry(
+        async () => {
+          const response = await client.models.generateContent({
+            model: "gemini-3.8-flash",
+            contents: prompt,
+            config: {
+              systemInstruction: systemInstruction || "You are an intelligent educational assistant.",
+              temperature: typeof temperature === "number" ? temperature : 0.7,
+            },
+          });
+          return {
+            success: true,
+            source: "gemini",
+            text: response.text || fallbackResponse || "",
+          };
+        },
+        "general_gemini_generate"
+      );
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[API Error] /api/gemini/generate failed:", err);
+    return res.json({
+      success: false,
+      source: "fallback",
+      error: err.message,
+      text: req.body.fallbackResponse || "",
+    });
+  }
 });
 
 // 2. Return VAPID Public Key for Client Subscription
