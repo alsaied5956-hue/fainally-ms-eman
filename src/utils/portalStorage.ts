@@ -420,9 +420,16 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
   if (existing) {
     existing.status = "deleted";
     existing.deletedAt = nowIso;
+    existing.reason = revokeReason;
   }
   delete accounts[cleanBarcode];
   saveLocalParentAccounts(accounts);
+
+  // If local active session matches deleted account, clear session immediately
+  const curSess = getSavedPortalSession();
+  if (curSess?.role === "parent" && String(curSess.account?.studentBarcode).trim() === cleanBarcode) {
+    savePortalSession(null);
+  }
 
   // 1. Broadcast revocation immediately across same device tabs
   accountEventsBus?.postMessage({
@@ -444,9 +451,9 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
   }
 
   // 2. Multi-channel cloud revocation & deletion to guarantee remote mobile logout
-  ensureFirebaseAuth()
-    .then(async () => {
-      if (!db) return;
+  try {
+    await ensureFirebaseAuth();
+    if (db) {
       await Promise.all([
         // Update document status to deleted so active Firestore snapshot listeners trigger immediately
         setDoc(
@@ -460,6 +467,7 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
           revoked: true,
           reason: revokeReason,
           revokedAt: nowIso,
+          timestamp: Date.now(),
         }),
         // Update the cloud accounts registry
         setDoc(
@@ -468,10 +476,10 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
           { merge: true }
         ),
       ]);
-    })
-    .catch((err) => {
-      console.warn("Cloud parent account delete notice:", err);
-    });
+    }
+  } catch (err) {
+    console.warn("Cloud parent account delete notice:", err);
+  }
 }
 
 /**
@@ -694,39 +702,33 @@ export function subscribeToParentAccountLiveStatus(
   let isCancelled = false;
   let hasFiredRevocation = false;
 
-  // Activation epoch: any revocation with timestamp <= activeEpoch is considered obsolete (from previous deletion)
-  let activeEpoch = initialActivatedAt
-    ? new Date(initialActivatedAt).getTime()
-    : Date.now() - 5000;
-
-  const isRevocationLegitimate = (revokedAtStr?: string) => {
-    if (!revokedAtStr) return false;
-    const revTime = new Date(revokedAtStr).getTime();
-    if (isNaN(revTime)) return false;
-    // Must have occurred strictly AFTER this account was activated
-    return revTime > activeEpoch;
-  };
-
-  const triggerRevoke = (reason: string, revokedAtStr?: string) => {
+  const triggerRevoke = (reason: string) => {
     if (isCancelled || hasFiredRevocation) return;
-    if (revokedAtStr && !isRevocationLegitimate(revokedAtStr)) {
-      // This revocation happened prior to the current activation. Ignore it!
-      return;
-    }
     hasFiredRevocation = true;
+
+    // Purge local session instantly so browser / refresh cannot resurrect it
+    savePortalSession(null);
+
+    // Fire window event for local components
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("eman_account_revoked", {
+          detail: {
+            barcode: targetBarcode,
+            reason,
+          },
+        })
+      );
+    }
+
     onRevoked(reason);
   };
 
   // 1. BroadcastChannel listener (same device / multi-tab)
   const handleBusMessage = (ev: MessageEvent) => {
     if (String(ev.data?.barcode).trim() !== targetBarcode) return;
-
-    if (ev.data?.type === "ACCOUNT_ACTIVATED") {
-      const actTime = ev.data.activatedAt ? new Date(ev.data.activatedAt).getTime() : Date.now();
-      activeEpoch = Math.max(activeEpoch, actTime);
-      hasFiredRevocation = false;
-    } else if (ev.data?.type === "ACCOUNT_REVOKED") {
-      triggerRevoke(ev.data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.", ev.data.revokedAt);
+    if (ev.data?.type === "ACCOUNT_REVOKED") {
+      triggerRevoke(ev.data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
     }
   };
   accountEventsBus?.addEventListener("message", handleBusMessage);
@@ -734,28 +736,16 @@ export function subscribeToParentAccountLiveStatus(
   // 2. Window event listener (same tab)
   const handleRevokeWindowEvent = (ev: Event) => {
     const customEv = ev as CustomEvent;
-    if (String(customEv.detail?.barcode).trim() === targetBarcode) {
+    const evBarcode = String(customEv.detail?.barcode || "").trim();
+    if (!evBarcode || evBarcode === targetBarcode) {
       triggerRevoke(
-        customEv.detail.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.",
-        customEv.detail?.revokedAt
+        customEv.detail?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة."
       );
-    }
-  };
-
-  const handleActivatedWindowEvent = (ev: Event) => {
-    const customEv = ev as CustomEvent;
-    if (String(customEv.detail?.barcode).trim() === targetBarcode) {
-      const actTime = customEv.detail?.activatedAt
-        ? new Date(customEv.detail.activatedAt).getTime()
-        : Date.now();
-      activeEpoch = Math.max(activeEpoch, actTime);
-      hasFiredRevocation = false;
     }
   };
 
   if (typeof window !== "undefined") {
     window.addEventListener("eman_account_revoked", handleRevokeWindowEvent);
-    window.addEventListener("eman_account_activated", handleActivatedWindowEvent);
   }
 
   // 3. Storage event listener (cross-tab LocalStorage modification)
@@ -764,15 +754,10 @@ export function subscribeToParentAccountLiveStatus(
       try {
         const accs = JSON.parse(ev.newValue) as Record<string, ParentAccount>;
         const acc = accs[targetBarcode];
-        if (acc) {
-          if (acc.status === "active" && acc.activatedAt) {
-            activeEpoch = Math.max(activeEpoch, new Date(acc.activatedAt).getTime());
-            hasFiredRevocation = false;
-          } else if (acc.status === "deleted" && isRevocationLegitimate(acc.deletedAt)) {
-            triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", acc.deletedAt);
-          } else if (acc.status === "disabled") {
-            triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-          }
+        if (!acc || acc.status === "deleted") {
+          triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        } else if (acc.status === "disabled") {
+          triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
         }
       } catch {}
     }
@@ -795,18 +780,16 @@ export function subscribeToParentAccountLiveStatus(
           doc(db, "parent_accounts", targetBarcode),
           (snap) => {
             if (isCancelled) return;
-            // Note: Never trigger revoke on non-existence (network/cache jitter).
-            // Only trigger on explicit status === 'deleted' or 'disabled'.
-            if (!snap.exists()) return;
+            if (!snap.exists()) {
+              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              return;
+            }
             const data = snap.data() as ParentAccount;
             if (data) {
-              if (data.status === "active" && data.activatedAt) {
-                activeEpoch = Math.max(activeEpoch, new Date(data.activatedAt).getTime());
-                hasFiredRevocation = false;
-              } else if (data.status === "deleted" && isRevocationLegitimate(data.deletedAt)) {
-                triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", data.deletedAt);
+              if (data.status === "deleted") {
+                triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
               } else if (data.status === "disabled") {
-                triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+                triggerRevoke(data.reason || "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
               }
             }
           },
@@ -822,8 +805,8 @@ export function subscribeToParentAccountLiveStatus(
             if (isCancelled) return;
             if (snap.exists()) {
               const revData = snap.data();
-              if (revData?.revoked && isRevocationLegitimate(revData.revokedAt)) {
-                triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.", revData.revokedAt);
+              if (revData?.revoked) {
+                triggerRevoke(revData?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
               }
             }
           },
@@ -841,15 +824,10 @@ export function subscribeToParentAccountLiveStatus(
               const regData = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
               if (regData) {
                 const acc = regData[targetBarcode];
-                if (acc) {
-                  if (acc.status === "active" && acc.activatedAt) {
-                    activeEpoch = Math.max(activeEpoch, new Date(acc.activatedAt).getTime());
-                    hasFiredRevocation = false;
-                  } else if (acc.status === "deleted" && isRevocationLegitimate(acc.deletedAt)) {
-                    triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", acc.deletedAt);
-                  } else if (acc.status === "disabled") {
-                    triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-                  }
+                if (!acc || acc.status === "deleted") {
+                  triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+                } else if (acc.status === "disabled") {
+                  triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
                 }
               }
             }
@@ -864,25 +842,43 @@ export function subscribeToParentAccountLiveStatus(
     })
     .catch(() => {});
 
-  // 5. Periodic check and window focus/visibility handler (mobile resumes from sleep/background)
+  // 5. Periodic check and window focus/visibility/pageshow handler (mobile phone wakes up from lockscreen / background)
   const checkStatus = async () => {
     if (isCancelled || hasFiredRevocation) return;
     try {
+      // LocalStorage check
+      const localAccs = getLocalParentAccounts();
+      const localAcc = localAccs[targetBarcode];
+      if (localAcc && (localAcc.status === "deleted" || localAcc.status === "disabled")) {
+        triggerRevoke(localAcc.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        return;
+      }
+
       await ensureFirebaseAuth();
-      if (db) {
-        const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
-        if (snap.exists()) {
-          const data = snap.data() as ParentAccount;
-          if (data) {
-            if (data.status === "active" && data.activatedAt) {
-              activeEpoch = Math.max(activeEpoch, new Date(data.activatedAt).getTime());
-            } else if (data.status === "deleted" && isRevocationLegitimate(data.deletedAt)) {
-              triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.", data.deletedAt);
-            } else if (data.status === "disabled") {
-              triggerRevoke("تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
-            }
-          }
+      if (!db || isCancelled || hasFiredRevocation) return;
+
+      // 1. Direct doc check in Firestore
+      const snap = await getDoc(doc(db, "parent_accounts", targetBarcode));
+      if (!snap.exists()) {
+        triggerRevoke("تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        return;
+      }
+      const data = snap.data() as ParentAccount;
+      if (data) {
+        if (data.status === "deleted") {
+          triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+          return;
+        } else if (data.status === "disabled") {
+          triggerRevoke(data.reason || "تم تعطيل هذا الحساب مؤقتاً من قِبل إدارة المنظومة.");
+          return;
         }
+      }
+
+      // 2. Direct tombstone check in account_revocations
+      const revSnap = await getDoc(doc(db, "account_revocations", targetBarcode));
+      if (revSnap.exists() && revSnap.data()?.revoked) {
+        triggerRevoke(revSnap.data()?.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        return;
       }
     } catch {}
   };
@@ -895,19 +891,21 @@ export function subscribeToParentAccountLiveStatus(
 
   if (typeof window !== "undefined") {
     window.addEventListener("focus", checkStatus);
+    window.addEventListener("pageshow", checkStatus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
 
-  const pollInterval = setInterval(checkStatus, 15000);
+  // Active 2.5-second heartbeat for instant automatic phone logout
+  const pollInterval = setInterval(checkStatus, 2500);
 
   return () => {
     isCancelled = true;
     accountEventsBus?.removeEventListener("message", handleBusMessage);
     if (typeof window !== "undefined") {
       window.removeEventListener("eman_account_revoked", handleRevokeWindowEvent);
-      window.removeEventListener("eman_account_activated", handleActivatedWindowEvent);
       window.removeEventListener("storage", handleStorageEvent);
       window.removeEventListener("focus", checkStatus);
+      window.removeEventListener("pageshow", checkStatus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
     clearInterval(pollInterval);

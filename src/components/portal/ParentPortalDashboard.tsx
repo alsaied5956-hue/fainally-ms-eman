@@ -141,6 +141,23 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     return () => window.removeEventListener("popstate", handleUrlChange);
   }, []);
 
+  // Emergency safety listener: if account is remotely revoked/deleted, logout immediately
+  useEffect(() => {
+    const handleRemoteRevoke = (ev: Event) => {
+      const customEv = ev as CustomEvent;
+      const myBarcode = String(account.studentBarcode).trim();
+      const targetBarcode = String(customEv.detail?.barcode || "").trim();
+      if (!targetBarcode || targetBarcode === myBarcode) {
+        onLogout();
+      }
+    };
+
+    window.addEventListener("eman_account_revoked", handleRemoteRevoke);
+    return () => {
+      window.removeEventListener("eman_account_revoked", handleRemoteRevoke);
+    };
+  }, [account.studentBarcode, onLogout]);
+
   // Financial Sub-Tab: "ledger" (full academic year) vs "receipts" (recorded receipts)
   const [activeFinancialSubTab, setActiveFinancialSubTab] = useState<"ledger" | "receipts">("ledger");
 

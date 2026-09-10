@@ -42,13 +42,13 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
   }, []);
 
   // Handle logout
-  function handleLogout(keepNotice: boolean = true) {
+  const handleLogout = useCallback((keepNotice: boolean = true) => {
     setSession(null);
     savePortalSession(null);
     if (!keepNotice) {
       setRevocationNotice(null);
     }
-  }
+  }, []);
 
   // Live remote logout watcher:
   // If admin explicitly disables or revokes account, force remote logout
@@ -72,7 +72,7 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
     return () => {
       unsubscribe();
     };
-  }, [session, handleLogout]);
+  }, [session?.role, session?.account?.studentBarcode, session?.account?.activatedAt, handleLogout]);
 
   // Handle successful login from AuthScreen
   const handleLoginSuccess = (

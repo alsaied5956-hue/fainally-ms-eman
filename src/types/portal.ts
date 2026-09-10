@@ -11,6 +11,7 @@ export interface ParentAccount {
   updatedAt?: string;
   activatedAt?: string;
   deletedAt?: string;
+  reason?: string;
   lastLoginAt?: string;
 }
 
