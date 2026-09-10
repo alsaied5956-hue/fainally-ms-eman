@@ -13,7 +13,28 @@ import {
   doc,
   setDoc,
   onSnapshot,
+  setLogLevel,
 } from "firebase/firestore";
+
+// Suppress benign internal gRPC idle stream disconnect warnings and retry logs in Node.js
+try {
+  setLogLevel("silent");
+} catch {}
+
+// Prevent benign gRPC stream idle cancellations from being treated as fatal unhandled rejections
+process.on("unhandledRejection", (reason: any) => {
+  const msg = String(reason?.message || reason || "");
+  if (
+    msg.includes("idle stream") ||
+    msg.includes("CANCELLED") ||
+    msg.includes("Disconnecting idle stream") ||
+    reason?.code === "cancelled" ||
+    reason?.code === 1
+  ) {
+    return;
+  }
+  console.error("[Server Unhandled Rejection]:", reason);
+});
 import firebaseConfig from "./firebase-applet-config.json";
 import {
   generateSmartStudentNotification,
@@ -1022,7 +1043,17 @@ function setupAutonomousBackgroundPushListeners() {
         if (handleFirestoreQuotaWarning("push_subscriptions listener", err)) {
           detachAllFirestoreListeners();
         } else {
-          console.warn("[Background Push] push_subscriptions listener notice:", err.message || err);
+          const msg = String(err?.message || err || "");
+          if (
+            msg.includes("idle stream") ||
+            msg.includes("CANCELLED") ||
+            msg.includes("Disconnecting idle stream") ||
+            err?.code === "cancelled" ||
+            (err as any)?.code === 1
+          ) {
+            return;
+          }
+          console.warn("[Background Push] push_subscriptions listener notice:", msg);
         }
       }
     );
@@ -1090,7 +1121,17 @@ function setupAutonomousBackgroundPushListeners() {
         if (handleFirestoreQuotaWarning("live_events listener", err)) {
           detachAllFirestoreListeners();
         } else {
-          console.warn("[Background Push] live_events onSnapshot notice:", err.message || err);
+          const msg = String(err?.message || err || "");
+          if (
+            msg.includes("idle stream") ||
+            msg.includes("CANCELLED") ||
+            msg.includes("Disconnecting idle stream") ||
+            err?.code === "cancelled" ||
+            (err as any)?.code === 1
+          ) {
+            return;
+          }
+          console.warn("[Background Push] live_events onSnapshot notice:", msg);
         }
       }
     );
@@ -1173,7 +1214,17 @@ function setupAutonomousBackgroundPushListeners() {
         if (handleFirestoreQuotaWarning("main_center_data listener", err)) {
           detachAllFirestoreListeners();
         } else {
-          console.warn("[Background Push] main_center_data onSnapshot notice:", err.message || err);
+          const msg = String(err?.message || err || "");
+          if (
+            msg.includes("idle stream") ||
+            msg.includes("CANCELLED") ||
+            msg.includes("Disconnecting idle stream") ||
+            err?.code === "cancelled" ||
+            (err as any)?.code === 1
+          ) {
+            return;
+          }
+          console.warn("[Background Push] main_center_data onSnapshot notice:", msg);
         }
       }
     );
