@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { createPortal } from "react-dom";
 import {
   BellRing,
   CheckCircle2,
@@ -29,7 +30,7 @@ export const NotificationPermissionModal: React.FC<NotificationPermissionModalPr
   const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState<"idle" | "success" | "denied">("idle");
 
-  if (!isOpen) return null;
+  if (!isOpen || typeof document === "undefined") return null;
 
   const handleActivate = async () => {
     setIsProcessing(true);
@@ -71,10 +72,11 @@ export const NotificationPermissionModal: React.FC<NotificationPermissionModalPr
     }
   };
 
-  return (
+  return createPortal(
     <div
       id="notification-permission-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fadeIn"
+      className="fixed inset-0 z-[999990] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fadeIn"
+      style={{ zIndex: 999990 }}
       dir="rtl"
     >
       <div className="relative w-full max-w-lg bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border-2 border-amber-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl overflow-hidden">
@@ -221,6 +223,7 @@ export const NotificationPermissionModal: React.FC<NotificationPermissionModalPr
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

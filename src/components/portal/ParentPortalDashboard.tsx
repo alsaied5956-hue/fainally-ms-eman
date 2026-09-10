@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Student, PaymentRecord, GroupDays, GradeName } from "../../types";
 import {
   ParentAccount,
@@ -2437,9 +2438,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       </main>
 
       {/* MODAL: ADD / LINK ANOTHER CHILD */}
-      {showAddChildModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm overflow-y-auto animate-fadeIn">
-          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border border-amber-500/30 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
+      {showAddChildModal && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-[999990] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md overflow-y-auto animate-fadeIn"
+          style={{ zIndex: 999990 }}
+          dir="rtl"
+        >
+          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border-2 border-amber-500/40 p-6 shadow-2xl space-y-4 text-right max-h-[90vh] overflow-y-auto custom-scrollbar my-auto">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-white font-fancy">
                 ربط ابن آخر بحسابك
@@ -2528,7 +2533,8 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

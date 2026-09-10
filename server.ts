@@ -27,7 +27,7 @@ app.use(
   compression({
     threshold: 1024, // only compress responses above 1KB
     level: 6,
-  })
+  }) as any
 );
 
 app.use(express.json({ limit: "10mb" }));
