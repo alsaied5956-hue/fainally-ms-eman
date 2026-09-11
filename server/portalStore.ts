@@ -508,6 +508,21 @@ export function saveParentAccountRecord(account: ParentAccountRecord): ParentAcc
   return updated;
 }
 
+export function deleteParentAccountRecord(barcode: string): boolean {
+  const bCode = String(barcode).trim();
+  if (parentAccountsCache[bCode]) {
+    delete parentAccountsCache[bCode];
+    persistAccountsDebounced();
+    broadcastPortalSSE({
+      type: "account_deleted",
+      barcode: bCode,
+      timestamp: Date.now(),
+    });
+    return true;
+  }
+  return false;
+}
+
 // ----------------------------------------------------
 // MULTI-DEVICE / MACHINE-SPECIFIC ISOLATED STATE STORE
 // Zero-cross-talk state management per Device ID / Machine ID

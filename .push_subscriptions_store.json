@@ -88,5 +88,21 @@
     },
     "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
     "updatedAt": 1788914964516
+  },
+  {
+    "userId": "252525",
+    "aliases": [
+      "252525",
+      "01234567890",
+      "201234567890"
+    ],
+    "userRole": "parent",
+    "endpoint": "https://fcm.googleapis.com/fcm/send/dWBdtUxsivk:APA91bGNKEeyOjmHwGEbh89lopO7IPkTGAHhn53J8W7mQpXlvnjeCspWpgtnBHF50cZfXIwKlSQ6NMFhgm0Hv90zKJVxib3ScqDn2QDTAD46xneHI8wEUTasKaLtZJx6hp-teiF6S5p1",
+    "keys": {
+      "p256dh": "BKkiTJOAnuaUoqcRXQYPjIR_SzmrARt8K6rHjBxZratoP-ZqX2ko10ptGzat2s7heI6Vg9SQ0nNQ7HAVv5Z71dg",
+      "auth": "BpG2-ziSa4tdAd45wmv4zw"
+    },
+    "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
+    "updatedAt": 1789050507404
   }
 ]

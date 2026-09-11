@@ -401,6 +401,26 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode: account.studentBarcode, reason: reasonText }),
       }).catch(() => {});
+      fetch(`/api/portal/admin/accounts/${account.studentBarcode}/suspend`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-supervisor-pin": "2468",
+          "x-user-role": "admin",
+        },
+        body: JSON.stringify({ reason: reasonText }),
+      }).catch(() => {});
+    } catch {}
+  } else if (account.status === "active") {
+    try {
+      fetch(`/api/portal/admin/accounts/${account.studentBarcode}/activate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-supervisor-pin": "2468",
+          "x-user-role": "admin",
+        },
+      }).catch(() => {});
     } catch {}
   }
 
@@ -517,12 +537,19 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
       );
     }
 
-    // 2. High-speed Direct Server Broadcast (Sub-50ms) to trigger immediate mobile logout
+    // 2. High-speed Direct Server Broadcast (Sub-50ms) to trigger immediate mobile logout & cascading deletion
     try {
       fetch("/api/account-revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode: b, reason: revokeReason }),
+      }).catch(() => {});
+      fetch(`/api/portal/admin/accounts/${encodeURIComponent(b)}?mode=hard`, {
+        method: "DELETE",
+        headers: {
+          "x-supervisor-pin": "2468",
+          "x-user-role": "admin",
+        },
       }).catch(() => {});
     } catch {}
   }

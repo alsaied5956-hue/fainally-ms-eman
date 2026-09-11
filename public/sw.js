@@ -113,7 +113,7 @@ self.addEventListener("push", (event) => {
     body: data.body,
     icon: data.icon || "/icon.svg",
     badge: data.badge || "/icon.svg",
-    vibrate: [500, 200, 500, 200, 800], // Strong high-priority vibration pattern
+    vibrate: [500, 100, 500, 100, 500], // High-priority aggressive vibration pattern
     sound: "/notification.wav", // Custom audio chime
     silent: false, // Rings device's notification ringtone
     renotify: true, // Alerts phone sound even if prior notification is in tray
@@ -131,13 +131,14 @@ self.addEventListener("push", (event) => {
     data: {
       url: isChat ? "/?tab=chat" : (data.url || "/"),
       eventId: data.eventId,
+      sound: data.sound || "/notification.wav",
       timestamp: data.timestamp || Date.now()
     },
     dir: "rtl",
     lang: "ar"
   };
 
-  // Broadcast to open clients so they can immediately mark event as processed and play acoustic chime
+  // Inform open clients of the push data without attempting unpermitted background audio autoplay
   const notifyClients = self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
     clientList.forEach((client) => {
       client.postMessage({
@@ -146,6 +147,7 @@ self.addEventListener("push", (event) => {
         notifType: data.type || "alert",
         title: data.title,
         body: data.body,
+        sound: data.sound || "/notification.wav",
       });
     });
   });
@@ -203,10 +205,11 @@ self.addEventListener("message", (event) => {
   }
 });
 
-// Notification Click Handler: focuses existing window or opens the portal
+// Notification Click Handler: focuses window and triggers user-gesture acoustic chime safely
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   let targetUrl = event.notification.data?.url || "/";
+  const soundUrl = event.notification.data?.sound || "/notification.wav";
 
   if (event.action === "open_chat") {
     targetUrl = "/?tab=chat";
@@ -216,16 +219,33 @@ self.addEventListener("notificationclick", (event) => {
 
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      // 1. Focus existing window if open
       for (const client of clientList) {
         if ("focus" in client) {
           if (client.url && client.navigate) {
             client.navigate(targetUrl);
           }
+          client.postMessage({
+            type: "USER_INTERACTED_PLAY_ALERT",
+            sound: soundUrl,
+            url: targetUrl,
+            timestamp: Date.now(),
+          });
           return client.focus();
         }
       }
+      // 2. Otherwise open new window
       if (clients.openWindow) {
-        return clients.openWindow(targetUrl);
+        return clients.openWindow(targetUrl).then((newWindow) => {
+          if (newWindow) {
+            newWindow.postMessage({
+              type: "USER_INTERACTED_PLAY_ALERT",
+              sound: soundUrl,
+              url: targetUrl,
+              timestamp: Date.now(),
+            });
+          }
+        });
       }
     })
   );

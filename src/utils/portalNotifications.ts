@@ -47,6 +47,24 @@ if (typeof window !== "undefined") {
   window.addEventListener("click", unlockAudio, { passive: true });
   window.addEventListener("touchstart", unlockAudio, { passive: true });
   window.addEventListener("keydown", unlockAudio, { passive: true });
+
+  // Safe Post-Interaction Audio Chime: Dispatched by Service Worker upon user notification click
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data?.type === "USER_INTERACTED_PLAY_ALERT") {
+        unlockAudio();
+        const soundUrl = event.data.sound || "/notification.wav";
+        try {
+          const audio = new Audio(soundUrl);
+          audio.play().catch(() => {
+            playPortalAudioChime("alert");
+          });
+        } catch {
+          playPortalAudioChime("alert");
+        }
+      }
+    });
+  }
 }
 
 /**
