@@ -244,7 +244,7 @@ function notifySyncStatusChange(): void {
   });
 }
 
-function notifyCloudDataListeners(data: SystemData): void {
+export function notifyCloudDataListeners(data: SystemData): void {
   cloudDataListeners.forEach((cb) => {
     try {
       cb(data);
@@ -601,6 +601,15 @@ export function saveToLocalStorage(data: SystemData, updateTimestamp: boolean = 
   }
 
   broadcastLocalChange(clonedData);
+
+  // ⚡ High-speed Realtime Multi-Device Sync: Broadcast immediately to all other supervisor screens (<30ms)
+  if (updateTimestamp && typeof window !== "undefined") {
+    import("./onlineRealtimeSync")
+      .then((m) => {
+        m.notifyOtherDevicesOfSystemUpdate(clonedData);
+      })
+      .catch(() => {});
+  }
 }
 
 /**

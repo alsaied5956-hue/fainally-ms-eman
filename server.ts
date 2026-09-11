@@ -476,9 +476,17 @@ app.post("/api/portal/system-sync", (req, res) => {
       (req.headers["x-device-id"] as string) ||
       (req.headers["x-machine-id"] as string) ||
       req.body.deviceId;
+    const clientId = (req.headers["x-client-id"] as string) || req.body._lastClientId;
     if (deviceId) {
       registerOrUpdateDeviceState(deviceId, {}, req.ip);
     }
+    // Instantly broadcast to ALL connected supervisor screens over SSE (<30ms, zero Firestore quota)
+    broadcastPortalSSE({
+      type: "SYSTEM_DATA_UPDATED",
+      clientId,
+      data: req.body,
+      timestamp: Date.now(),
+    });
     return res.json({ success: true, timestamp: Date.now() });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -662,6 +670,12 @@ app.get("/api/portal/accounts-sync", (_req, res) => {
 app.post("/api/portal/account-save", (req, res) => {
   try {
     const saved = saveParentAccountRecord(req.body);
+    broadcastPortalSSE({
+      type: "ACCOUNT_SAVED",
+      account: saved,
+      barcode: saved.studentBarcode,
+      timestamp: Date.now(),
+    });
     return res.json({ success: true, account: saved });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -1649,10 +1663,17 @@ loadChatStore();
 // 1. Post New Chat Message with Sub-50ms SSE Delivery + Loud Push
 app.post("/api/portal/chat/message", (req, res) => {
   try {
-    const { conversationId, senderId, senderRole, text, recipientId } = req.body;
-    if (!conversationId || !senderId || !text || !text.trim()) {
+    const rawConvId = req.body.conversationId || req.body.chatId;
+    const rawSenderId = req.body.senderId || req.body.sender || (req.body.senderRole === "supervisor" ? "admin" : rawConvId);
+    const text = req.body.text;
+    if (!rawConvId || !text || !String(text).trim()) {
       return res.status(400).json({ error: "Missing required chat parameters" });
     }
+
+    const conversationId = String(rawConvId).trim();
+    const senderRole = req.body.senderRole === "supervisor" || req.body.sender === "admin" ? "supervisor" : "parent";
+    const sender = senderRole === "supervisor" ? "admin" : "parent";
+    const senderName = req.body.senderName || (senderRole === "supervisor" ? "إدارة المنظومة" : "ولي الأمر");
 
     const timeFormatted = new Intl.DateTimeFormat("ar-EG", {
       hour: "numeric",
@@ -1660,30 +1681,40 @@ app.post("/api/portal/chat/message", (req, res) => {
       hour12: true,
     }).format(new Date());
 
-    const newMsg: ChatMessageItem = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      conversationId: String(conversationId).trim(),
-      senderId: String(senderId).trim(),
-      senderRole: senderRole === "supervisor" ? "supervisor" : "parent",
+    const newMsg: any = {
+      id: req.body.id || `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      conversationId,
+      chatId: conversationId,
+      senderId: String(rawSenderId || (senderRole === "supervisor" ? "admin" : conversationId)).trim(),
+      sender,
+      senderRole,
+      senderName,
       text: String(text).trim(),
       status: "SENT",
-      timestamp: Date.now(),
+      isRead: false,
+      timestamp: req.body.timestamp || Date.now(),
       timeFormatted,
     };
 
-    const convList = chatMessagesStore.get(newMsg.conversationId) || [];
+    const convList = chatMessagesStore.get(conversationId) || [];
     convList.push(newMsg);
-    chatMessagesStore.set(newMsg.conversationId, convList);
+    // Cap in-memory history to last 100 messages to respect data limits
+    if (convList.length > 100) {
+      convList.splice(0, convList.length - 100);
+    }
+    chatMessagesStore.set(conversationId, convList);
     persistChatStore();
 
-    // Broadcast instantaneously over Portal SSE stream
+    // Broadcast instantaneously over Portal SSE stream (reaches supervisors AND target parent device)
     broadcastPortalSSE({
       type: "CHAT_MESSAGE",
+      barcode: conversationId,
+      chatId: conversationId,
       message: newMsg,
     });
 
     // Send high-priority loud push alert to recipient
-    const target = recipientId || (senderRole === "supervisor" ? conversationId : "admin");
+    const target = req.body.recipientId || (senderRole === "supervisor" ? conversationId : "admin");
     sendWebPushToTargets({
       targetUserIds: [target],
       title: senderRole === "supervisor" ? "رسالة جديدة من إدارة المنظومة" : `رسالة جديدة من ولي أمر (${conversationId})`,
@@ -1695,6 +1726,20 @@ app.post("/api/portal/chat/message", (req, res) => {
     }).catch(() => {});
 
     return res.json({ success: true, message: newMsg });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Fast Fetch of All Chat Threads for Instant 0ms Supervisor UI Hydration
+app.get("/api/portal/chat/all", (_req, res) => {
+  try {
+    applyZeroCacheHeaders(res);
+    const all: Record<string, any[]> = {};
+    chatMessagesStore.forEach((msgs, convId) => {
+      all[convId] = msgs.slice(-100);
+    });
+    return res.json({ success: true, chats: all });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

@@ -93,6 +93,7 @@ import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide
 import { PortalMasterApp } from "./components/portal/PortalMasterApp";
 import { deleteParentAccount } from "./utils/portalStorage";
 import { PWAUpdateNotification } from "./components/portal/PWAUpdateNotification";
+import { initOnlineRealtimeSync } from "./utils/onlineRealtimeSync";
 
 export default function App() {
   const [appViewMode, setAppViewMode] = useState<"portal" | "teacher">(() => {
@@ -281,6 +282,12 @@ export default function App() {
     pullLatestCloudDataImmediately().catch(() => {});
     // 2. Automatically send whatever was saved on local disk to Cloud if pending
     autoPushLocalDiskOnStartup().catch(() => {});
+    // 3. Connect to Zero-Latency Realtime SSE Multi-Device Stream (<30ms instant updates, 0 quota)
+    const unsubRealtimeSync = initOnlineRealtimeSync();
+
+    return () => {
+      unsubRealtimeSync();
+    };
   }, []);
 
   // 2. Subscribe to sync status & offline/online events
