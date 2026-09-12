@@ -6,9 +6,10 @@
       "senderId": "admin",
       "senderRole": "supervisor",
       "text": "مرحبا بكم في منظومة الأستاذة إيمان الدمشيتي",
-      "status": "SENT",
+      "status": "READ",
       "timestamp": 1789121968549,
-      "timeFormatted": "١٠:١٩ ص"
+      "timeFormatted": "١٠:١٩ ص",
+      "isRead": true
     }
   ],
   "test_realtime": [

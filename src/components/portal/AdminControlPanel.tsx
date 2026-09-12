@@ -318,6 +318,20 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     const unsub = subscribeToThreadChat(selectedChatBarcode, (msgs) => {
       setChatMessages(msgs);
       markChatThreadRead(selectedChatBarcode, "admin");
+      setAllChats((prev) => {
+        const thread = prev[selectedChatBarcode];
+        if (!thread) return prev;
+        let changed = false;
+        const nextThread = thread.map((m) => {
+          if (m.sender === "parent" && (!m.isRead || m.status !== "READ")) {
+            changed = true;
+            return { ...m, isRead: true, status: "READ" };
+          }
+          return m;
+        });
+        if (!changed) return prev;
+        return { ...prev, [selectedChatBarcode]: nextThread };
+      });
     });
 
     // Auto-focus input when entering chat
@@ -331,6 +345,33 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     };
   }, [selectedChatBarcode]);
 
+  const handleSelectChat = (barcode: string) => {
+    setSelectedChatBarcode(barcode);
+    markChatThreadRead(barcode, "admin");
+    setAllChats((prev) => {
+      const thread = prev[barcode];
+      if (!thread) return prev;
+      let changed = false;
+      const nextThread = thread.map((m) => {
+        if (m.sender === "parent" && (!m.isRead || m.status !== "READ")) {
+          changed = true;
+          return { ...m, isRead: true, status: "READ" };
+        }
+        return m;
+      });
+      if (!changed) return prev;
+      return { ...prev, [barcode]: nextThread };
+    });
+    setChatMessages((prev) => {
+      return prev.map((m) => {
+        if (m.sender === "parent" && (!m.isRead || m.status !== "READ")) {
+          return { ...m, isRead: true, status: "READ" };
+        }
+        return m;
+      });
+    });
+  };
+
   useEffect(() => {
     if (activeTab === "chats" && selectedChatBarcode) {
       chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -343,7 +384,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     let count = 0;
     Object.values(allChats).forEach((msgs) => {
       if (Array.isArray(msgs)) {
-        count += msgs.filter((m: ParentChatMessage) => m.sender === "parent" && !m.isRead).length;
+        count += msgs.filter((m: ParentChatMessage) => m.sender === "parent" && !m.isRead && m.status !== "READ").length;
       }
     });
     return count;
@@ -370,7 +411,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       .map((bCode) => {
         const student = students.find((s) => s.barcode === bCode);
         const msgs = allChats[bCode] || [];
-        const unreadCount = msgs.filter((m) => m.sender === "parent" && !m.isRead).length;
+        const unreadCount = msgs.filter((m) => m.sender === "parent" && !m.isRead && m.status !== "READ").length;
         const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
 
         return {
@@ -1487,7 +1528,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                       <button
                         key={thread.barcode}
                         type="button"
-                        onClick={() => setSelectedChatBarcode(thread.barcode)}
+                        onClick={() => handleSelectChat(thread.barcode)}
                         className={`w-full p-3 text-right transition cursor-pointer flex items-center gap-3 relative group ${
                           isSelected
                             ? "bg-indigo-600/20 border-r-4 border-indigo-500"

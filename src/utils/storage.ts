@@ -1240,61 +1240,53 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   const mergedStudents = Array.from(studentMap.values());
 
   // 2. Merge Attendance History & Today with tombstone protection
+  // Cloud attendance is the primary authoritative source of truth across all devices
   const mergedHistory: Record<string, Record<string, string>> = {};
 
-  if (localTime >= cloudTime) {
-    if (local.attendanceHistory) {
-      for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
+  // Populate from cloud attendanceHistory first
+  if (cloud.attendanceHistory) {
+    for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
+      mergedHistory[dateKey] = {};
+      for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
+        if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+          mergedHistory[dateKey][bCode] = status;
+        }
+      }
+    }
+  }
+
+  // Overlay from local attendanceHistory
+  if (local.attendanceHistory) {
+    for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
+      if (!mergedHistory[dateKey]) {
         mergedHistory[dateKey] = {};
-        for (const [bCode, status] of Object.entries(dayMap || {})) {
-          if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+      }
+      for (const [bCode, status] of Object.entries(dayMap || {})) {
+        if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
+          if (!mergedHistory[dateKey][bCode] || localTime >= cloudTime) {
             mergedHistory[dateKey][bCode] = status;
-          }
-        }
-      }
-    }
-    if (cloud.attendanceHistory) {
-      for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-        if (!mergedHistory[dateKey]) {
-          mergedHistory[dateKey] = {};
-          for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
-            if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
-              mergedHistory[dateKey][bCode] = status;
-            }
-          }
-        }
-      }
-    }
-  } else {
-    if (cloud.attendanceHistory) {
-      for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-        mergedHistory[dateKey] = {};
-        for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
-          if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
-            mergedHistory[dateKey][bCode] = status;
-          }
-        }
-      }
-    }
-    if (local.attendanceHistory) {
-      for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
-        if (!mergedHistory[dateKey]) {
-          mergedHistory[dateKey] = {};
-          for (const [bCode, status] of Object.entries(dayMap || {})) {
-            if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
-              mergedHistory[dateKey][bCode] = status;
-            }
           }
         }
       }
     }
   }
 
+  // Merge today's attendance: union cloud and local today's attendance
   let mergedToday: Record<string, string> = {};
-  const baseTodaySource = localTime >= cloudTime ? (local.attendanceToday || {}) : (cloud.attendanceToday || {});
-  for (const [bCode, status] of Object.entries(baseTodaySource)) {
-    if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
-      mergedToday[bCode] = status;
+  if (cloud.attendanceToday) {
+    for (const [bCode, status] of Object.entries(cloud.attendanceToday)) {
+      if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
+        mergedToday[bCode] = status;
+      }
+    }
+  }
+  if (local.attendanceToday) {
+    for (const [bCode, status] of Object.entries(local.attendanceToday)) {
+      if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
+        if (!mergedToday[bCode] || localTime >= cloudTime) {
+          mergedToday[bCode] = status;
+        }
+      }
     }
   }
 
@@ -1303,40 +1295,30 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     ...mergedToday,
   };
 
-  // 3. Merge Scan Log Order & Times (authoritative by latest modification timestamp)
+  // 3. Merge Scan Log Order & Times
   const remoteOrder = Array.isArray(cloud.scanLogOrder) ? cloud.scanLogOrder : [];
   const localOrder = Array.isArray(local.scanLogOrder) ? local.scanLogOrder : [];
+  const combinedScanTimes: Record<string, string> = {
+    ...(local.scanLogTimes || {}),
+    ...(cloud.scanLogTimes || {}),
+  };
 
   const localScanTime = parseTimestamp(local.scanLogUpdatedAt || local.updatedAt);
   const cloudScanTime = parseTimestamp(cloud.scanLogUpdatedAt || cloud.updatedAt);
 
-  let chosenOrder: string[];
-  let chosenScanTimes: Record<string, string>;
-
-  if (cloudScanTime > localScanTime) {
-    // Cloud has the newer scanner session state (e.g. session finished/cleared or students scanned on another device)
-    chosenOrder = [...remoteOrder];
-    chosenScanTimes = { ...(cloud.scanLogTimes || {}) };
-  } else {
-    // Local device has the newer or equal scanner session state
-    chosenOrder = [...localOrder];
-    chosenScanTimes = { ...(local.scanLogTimes || {}) };
-  }
-
-  // Deduplicate and filter out deleted barcodes
   const orderSet = new Set<string>();
+  const baseOrder = cloudScanTime >= localScanTime ? [...remoteOrder, ...localOrder] : [...localOrder, ...remoteOrder];
   const preMergedOrder: string[] = [];
 
-  chosenOrder.forEach((barcode) => {
+  baseOrder.forEach((barcode) => {
     if (barcode && !orderSet.has(barcode) && !deletedSet.has(barcode)) {
       orderSet.add(barcode);
       preMergedOrder.push(barcode);
     }
   });
 
-  // Filter out any stale scans that are from a previous date so the scanner is always fresh for today
   const mergedOrder = preMergedOrder.filter((barcode) => {
-    const timeIso = chosenScanTimes[barcode];
+    const timeIso = combinedScanTimes[barcode];
     if (typeof timeIso === "string" && timeIso.includes("T")) {
       return timeIso.startsWith(todayKey);
     }
@@ -1345,16 +1327,15 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
 
   const mergedScanTimes: Record<string, string> = {};
   mergedOrder.forEach((barcode) => {
-    if (chosenScanTimes[barcode]) {
-      mergedScanTimes[barcode] = chosenScanTimes[barcode];
+    if (combinedScanTimes[barcode]) {
+      mergedScanTimes[barcode] = combinedScanTimes[barcode];
     }
   });
 
-  // 4. Merge Payments (reconcile with authoritative latest timestamp & tombstones)
+  // 4. Merge Payments (Cloud is authoritative base, union non-conflicting local offline payments)
   const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
 
-  if (cloudTime > localTime && cloud.payments) {
-    // Cloud is strictly newer: Cloud state is authoritative for any months it contains
+  if (cloud.payments) {
     for (const [mKey, remoteRecords] of Object.entries(cloud.payments)) {
       mergedPayments[mKey] = {};
       if (remoteRecords && typeof remoteRecords === "object") {
@@ -1366,43 +1347,16 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
         }
       }
     }
-    // Only preserve local months that don't exist in cloud at all (excluding deleted tombstones)
-    if (local.payments) {
-      for (const [mKey, records] of Object.entries(local.payments)) {
-        if (!cloud.payments[mKey]) {
-          mergedPayments[mKey] = {};
-          for (const [bCode, localRec] of Object.entries(records || {})) {
-            if (!localRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
-            if (Number(localRec.amount) > 0) {
-              mergedPayments[mKey][bCode] = { ...localRec };
-            }
-          }
-        }
-      }
-    }
-  } else {
-    // Local is newer or equal: local payments are base
-    if (local.payments) {
-      for (const [mKey, records] of Object.entries(local.payments)) {
-        mergedPayments[mKey] = {};
-        for (const [bCode, rec] of Object.entries(records || {})) {
-          if (!rec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
-          if (Number(rec.amount) > 0) {
-            mergedPayments[mKey][bCode] = { ...rec };
-          }
-        }
-      }
-    }
-    // Deep union any missing non-deleted cloud payment records
-    if (cloud.payments) {
-      for (const [mKey, remoteRecords] of Object.entries(cloud.payments)) {
-        if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-        if (remoteRecords && typeof remoteRecords === "object") {
-          for (const [bCode, remoteRec] of Object.entries(remoteRecords)) {
-            if (!remoteRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
-            if (!mergedPayments[mKey][bCode] && Number(remoteRec.amount) > 0) {
-              mergedPayments[mKey][bCode] = { ...remoteRec };
-            }
+  }
+
+  if (local.payments) {
+    for (const [mKey, records] of Object.entries(local.payments)) {
+      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
+      if (records && typeof records === "object") {
+        for (const [bCode, localRec] of Object.entries(records)) {
+          if (!localRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
+          if (!mergedPayments[mKey][bCode] && Number(localRec.amount) > 0) {
+            mergedPayments[mKey][bCode] = { ...localRec };
           }
         }
       }
@@ -1898,12 +1852,12 @@ let lastSystemSyncETag = "";
  * decompresses it, merges it seamlessly with local disk data, and notifies all screens.
  * Especially crucial when a sleeping or powered-off device wakes up or opens the application!
  */
-export async function pullLatestCloudDataImmediately(): Promise<boolean> {
+export async function pullLatestCloudDataImmediately(force = false): Promise<boolean> {
   if (typeof window === "undefined" || !navigator.onLine) return false;
 
   const now = Date.now();
-  // Cooldown: Do not spam if we pulled within 15 seconds
-  if (now - lastSuccessfulPullTime < 15000 && !pullInFlightPromise) {
+  // Cooldown: Do not spam if we pulled within 15 seconds unless force is true
+  if (!force && now - lastSuccessfulPullTime < 15000 && !pullInFlightPromise) {
     return true;
   }
 
@@ -1923,6 +1877,7 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
           // 304 Not Modified: server has exact same state, zero data transfer required
           lastSnapshotReceivedAt = Date.now();
           lastSuccessfulPullTime = Date.now();
+          localStorage.setItem(PENDING_SYNC_KEY, "false");
           return true;
         } else if (syncResp.status === 200) {
           const etag = syncResp.headers.get("ETag");
@@ -1932,15 +1887,13 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
             const currentLocal = loadLocalData();
             const merged = mergeCloudDataWithLocal(currentLocal, serverData);
 
-            const incomingHash = JSON.stringify(merged);
-            if (incomingHash !== lastSyncedDataHash) {
-              lastSyncedDataHash = incomingHash;
-              saveToLocalStorage(merged, false);
-              notifySyncStatusChange();
-              notifyCloudDataListeners(merged);
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
-              }
+            lastSyncedDataHash = JSON.stringify(merged);
+            localStorage.setItem(PENDING_SYNC_KEY, "false");
+            saveToLocalStorage(merged, false);
+            notifySyncStatusChange();
+            notifyCloudDataListeners(merged);
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
             }
 
             lastSnapshotReceivedAt = Date.now();
@@ -1959,26 +1912,17 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
           const currentLocal = loadLocalData();
           const merged = mergeCloudDataWithLocal(currentLocal, supabaseData);
 
-          const incomingHash = JSON.stringify(merged);
-          if (incomingHash !== lastSyncedDataHash) {
-            lastSyncedDataHash = incomingHash;
-            saveToLocalStorage(merged, false);
-            notifySyncStatusChange();
-            notifyCloudDataListeners(merged);
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
-            }
+          lastSyncedDataHash = JSON.stringify(merged);
+          localStorage.setItem(PENDING_SYNC_KEY, "false");
+          saveToLocalStorage(merged, false);
+          notifySyncStatusChange();
+          notifyCloudDataListeners(merged);
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
           }
 
           lastSnapshotReceivedAt = Date.now();
           lastSuccessfulPullTime = Date.now();
-
-          // If this device had pending unsynced changes created while offline, flush them now
-          const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-          if (hasPending && !isCurrentlySyncing) {
-            flushPendingSyncToCloud(false).catch(() => {});
-          }
-
           return true;
         }
       } catch (sbErr) {
@@ -2001,26 +1945,17 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
             const currentLocal = loadLocalData();
             const merged = mergeCloudDataWithLocal(currentLocal, cloudObj);
 
-            const incomingHash = JSON.stringify(merged);
-            if (incomingHash !== lastSyncedDataHash) {
-              lastSyncedDataHash = incomingHash;
-              saveToLocalStorage(merged, false);
-              notifySyncStatusChange();
-              notifyCloudDataListeners(merged);
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
-              }
+            lastSyncedDataHash = JSON.stringify(merged);
+            localStorage.setItem(PENDING_SYNC_KEY, "false");
+            saveToLocalStorage(merged, false);
+            notifySyncStatusChange();
+            notifyCloudDataListeners(merged);
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
             }
 
             lastSnapshotReceivedAt = Date.now();
             lastSuccessfulPullTime = Date.now();
-
-            // If this device had pending unsynced changes created while offline, flush them now
-            const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-            if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
-              flushPendingSyncToCloud(false).catch(() => {});
-            }
-
             return true;
           }
         }
@@ -2311,21 +2246,11 @@ export function clearAllSystemData(): void {
 }
 
 /**
- * Automatically inspects the local disk (localStorage) and immediately pushes any pending
- * unsynced local changes to Firestore Cloud Database.
+ * Ensures local disk changes are only pushed if validated after pulling cloud state
  */
 export async function autoPushLocalDiskOnStartup(): Promise<boolean> {
-  if (typeof window === "undefined") return false;
-  try {
-    const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-    if (hasPending) {
-      return await flushPendingSyncToCloud(false);
-    }
-    return true;
-  } catch (err) {
-    console.warn("Auto-push local disk error:", err);
-    return false;
-  }
+  // Never push unverified local state on startup. All devices must pull authoritative cloud data first!
+  return true;
 }
 
 export function saveAttendanceTodayData(

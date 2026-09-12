@@ -1629,6 +1629,7 @@ interface ChatMessageItem {
   status: "SENT" | "DELIVERED" | "READ";
   timestamp: number;
   timeFormatted: string;
+  isRead?: boolean;
 }
 
 const CHAT_STORE_FILE = path.join(process.cwd(), ".chat_store.json");
@@ -1797,26 +1798,42 @@ app.post("/api/portal/chat/typing", (req, res) => {
 
 // 4. Read Receipts Handler
 app.post("/api/portal/chat/read", (req, res) => {
-  const { conversationId, messageIds, readerId } = req.body;
-  if (!conversationId) {
+  const { conversationId, chatId, messageIds, readerId, readerRole } = req.body;
+  const targetConvId = String(conversationId || chatId || "").trim();
+  if (!targetConvId) {
     return res.status(400).json({ error: "Missing conversationId" });
   }
 
-  const msgs = chatMessagesStore.get(conversationId);
-  if (msgs && Array.isArray(messageIds)) {
+  const msgs = chatMessagesStore.get(targetConvId);
+  if (msgs && Array.isArray(msgs)) {
+    let changed = false;
     msgs.forEach((m) => {
-      if (messageIds.includes(m.id)) {
-        m.status = "READ";
+      const matchesId = Array.isArray(messageIds) && messageIds.length > 0 && messageIds.includes(m.id);
+      const isBatchAll = !messageIds || (Array.isArray(messageIds) && messageIds.length === 0);
+      const matchesRole =
+        (readerRole === "admin" && (m.senderRole === "parent" || (m as any).sender === "parent")) ||
+        (readerRole === "parent" && (m.senderRole === "supervisor" || (m as any).sender === "admin"));
+
+      if (matchesId || isBatchAll || matchesRole) {
+        if (!m.isRead || m.status !== "READ") {
+          m.isRead = true;
+          m.status = "READ";
+          changed = true;
+        }
       }
     });
-    persistChatStore();
+    if (changed) {
+      persistChatStore();
+    }
   }
 
   broadcastPortalSSE({
     type: "CHAT_READ",
-    conversationId,
+    conversationId: targetConvId,
+    chatId: targetConvId,
     messageIds,
     readerId,
+    readerRole,
   });
 
   return res.json({ success: true });

@@ -282,6 +282,55 @@ function handleRealtimeEvent(event: any): void {
     return;
   }
 
+  // 3b. REAL-TIME CHAT READ: Mark messages as read across all devices instantly
+  if (event.type === "CHAT_READ") {
+    const chatId = String(event.chatId || event.conversationId || "").trim();
+    if (chatId) {
+      try {
+        const allChats = getLocalChatMessages();
+        const thread = allChats[chatId];
+        if (Array.isArray(thread)) {
+          let modified = false;
+          thread.forEach((msg) => {
+            const matchesId = Array.isArray(event.messageIds) && event.messageIds.length > 0 && event.messageIds.includes(msg.id);
+            const isBatchAll = !event.messageIds || (Array.isArray(event.messageIds) && event.messageIds.length === 0);
+            const matchesRole =
+              (event.readerRole === "admin" && (msg.sender === "parent" || (msg as any).senderRole === "parent")) ||
+              (event.readerRole === "parent" && (msg.sender === "admin" || (msg as any).senderRole === "supervisor"));
+
+            if (matchesId || isBatchAll || matchesRole) {
+              if (!msg.isRead || msg.status !== "READ") {
+                msg.isRead = true;
+                msg.status = "READ";
+                modified = true;
+              }
+            }
+          });
+
+          if (modified) {
+            allChats[chatId] = thread;
+            saveLocalChatMessages(allChats);
+          }
+        }
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("eman_chat_messages_read", {
+              detail: {
+                chatId,
+                readerRole: event.readerRole,
+                messageIds: event.messageIds,
+              },
+            })
+          );
+        }
+      } catch (err) {
+        console.warn("Error processing CHAT_READ event:", err);
+      }
+    }
+    return;
+  }
+
   // 4. ACCOUNT SAVED OR ACTIVATED: Remote account registration / activation
   if (event.type === "ACCOUNT_SAVED" || event.type === "ACCOUNT_ACTIVATED") {
     const acc = event.account as ParentAccount | undefined;

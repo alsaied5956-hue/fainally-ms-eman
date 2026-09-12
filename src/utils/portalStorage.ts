@@ -1664,23 +1664,70 @@ export async function sendParentChatMessage(
 }
 
 /**
+ * Intelligently merge local and remote chat messages, strictly preserving read status
+ * A message marked as read will NEVER revert to unread!
+ */
+export function mergeChatThreads(
+  existing: ParentChatMessage[] = [],
+  incoming: ParentChatMessage[] = []
+): ParentChatMessage[] {
+  const map = new Map<string, ParentChatMessage>();
+  (existing || []).forEach((m) => {
+    if (m?.id) {
+      map.set(m.id, {
+        ...m,
+        isRead: Boolean(m.isRead || m.status === "READ"),
+        status: (m.isRead || m.status === "READ") ? "READ" : (m.status || "SENT"),
+      });
+    }
+  });
+
+  (incoming || []).forEach((inc) => {
+    if (!inc?.id) return;
+    const prev = map.get(inc.id);
+    if (!prev) {
+      const isRead = Boolean(inc.isRead || inc.status === "READ");
+      map.set(inc.id, {
+        ...inc,
+        isRead,
+        status: isRead ? "READ" : (inc.status || "SENT"),
+      });
+    } else {
+      const isRead = Boolean(prev.isRead || inc.isRead || prev.status === "READ" || inc.status === "READ");
+      map.set(inc.id, {
+        ...prev,
+        ...inc,
+        isRead,
+        status: isRead ? "READ" : (inc.status || prev.status || "SENT"),
+      });
+    }
+  });
+
+  return Array.from(map.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
+/**
  * Mark thread messages as read
  */
 export async function markChatThreadRead(chatId: string, readerRole: "parent" | "admin"): Promise<void> {
   const allChats = getLocalChatMessages();
   const thread = allChats[chatId];
-  if (!thread) return;
+  if (!thread || !Array.isArray(thread)) return;
 
   let hasChanges = false;
+  const readMsgIds: string[] = [];
   thread.forEach((msg) => {
     // If reader is parent, mark admin messages as read
     // If reader is admin, mark parent messages as read
-    if (readerRole === "parent" && msg.sender === "admin" && !msg.isRead) {
+    const isTarget =
+      (readerRole === "parent" && (msg.sender === "admin" || (msg as any).senderRole === "supervisor")) ||
+      (readerRole === "admin" && (msg.sender === "parent" || (msg as any).senderRole === "parent"));
+
+    if (isTarget && (!msg.isRead || msg.status !== "READ")) {
       msg.isRead = true;
+      msg.status = "READ";
       hasChanges = true;
-    } else if (readerRole === "admin" && msg.sender === "parent" && !msg.isRead) {
-      msg.isRead = true;
-      hasChanges = true;
+      readMsgIds.push(msg.id);
     }
   });
 
@@ -1688,16 +1735,38 @@ export async function markChatThreadRead(chatId: string, readerRole: "parent" | 
     allChats[chatId] = thread;
     saveLocalChatMessages(allChats);
 
-    if (chatBus) {
-      chatBus.postMessage({ type: "messages_read", chatId, readerRole });
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("eman_chat_messages_read", {
+          detail: { chatId, readerRole, messageIds: readMsgIds },
+        })
+      );
     }
+
+    if (chatBus) {
+      chatBus.postMessage({ type: "messages_read", chatId, readerRole, messageIds: readMsgIds });
+    }
+
+    // Immediately persist to backend server memory & disk
+    fetch("/api/portal/chat/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversationId: chatId,
+        chatId,
+        readerRole,
+        readerId: readerRole === "admin" ? "admin" : chatId,
+        messageIds: readMsgIds,
+      }),
+    }).catch(() => {});
 
     try {
       await ensureFirebaseAuth();
       if (db) {
-        await updateDoc(doc(db, "parent_chats", chatId), {
+        await setDoc(doc(db, "parent_chats", chatId), {
           messages: thread.slice(-100),
-        });
+          lastUpdated: Date.now(),
+        }, { merge: true });
       }
     } catch {}
   }
@@ -1741,8 +1810,18 @@ export function subscribeToThreadChat(
       onUpdate(chats[chatId] || []);
     }
   };
+  const handleReadEvent = (ev: Event) => {
+    if (isCancelled) return;
+    const detail = (ev as CustomEvent).detail;
+    if (detail && detail.chatId === chatId) {
+      const chats = getLocalChatMessages();
+      onUpdate(chats[chatId] || []);
+    }
+  };
+
   if (typeof window !== "undefined") {
     window.addEventListener("eman_chat_message_received", handleDirectChatEvent);
+    window.addEventListener("eman_chat_messages_read", handleReadEvent);
   }
 
   // 4. Firestore snapshot listener
@@ -1758,9 +1837,10 @@ export function subscribeToThreadChat(
             const cloudMessages = snap.data()?.messages as ParentChatMessage[] | undefined;
             if (cloudMessages && Array.isArray(cloudMessages)) {
               const chats = getLocalChatMessages();
-              chats[chatId] = cloudMessages;
+              const merged = mergeChatThreads(chats[chatId] || [], cloudMessages);
+              chats[chatId] = merged;
               saveLocalChatMessages(chats);
-              onUpdate(cloudMessages);
+              onUpdate(merged);
             }
           }
         },
@@ -1780,6 +1860,7 @@ export function subscribeToThreadChat(
     }
     if (typeof window !== "undefined") {
       window.removeEventListener("eman_chat_message_received", handleDirectChatEvent);
+      window.removeEventListener("eman_chat_messages_read", handleReadEvent);
     }
     if (unsubFirestore) {
       unsubFirestore();
@@ -1806,7 +1887,14 @@ export function subscribeToAllChats(
       .then((data) => {
         if (isCancelled || !data?.success || !data?.chats) return;
         const current = getLocalChatMessages();
-        const merged = { ...current, ...data.chats };
+        const merged: Record<string, ParentChatMessage[]> = { ...current };
+
+        Object.entries(data.chats as Record<string, ParentChatMessage[]>).forEach(([cId, remoteList]) => {
+          if (Array.isArray(remoteList)) {
+            merged[cId] = mergeChatThreads(current[cId] || [], remoteList);
+          }
+        });
+
         saveLocalChatMessages(merged);
         onUpdate(merged);
       })
@@ -1830,8 +1918,14 @@ export function subscribeToAllChats(
     if (isCancelled) return;
     onUpdate(getLocalChatMessages());
   };
+  const handleReadEvent = () => {
+    if (isCancelled) return;
+    onUpdate(getLocalChatMessages());
+  };
+
   if (typeof window !== "undefined") {
     window.addEventListener("eman_chat_message_received", handleDirectChatEvent);
+    window.addEventListener("eman_chat_messages_read", handleReadEvent);
   }
 
   // 4. LocalStorage storage event listener
@@ -1861,7 +1955,7 @@ export function subscribeToAllChats(
             const chatId = docSnap.id;
             const cloudMessages = data?.messages as ParentChatMessage[] | undefined;
             if (cloudMessages && Array.isArray(cloudMessages)) {
-              chats[chatId] = cloudMessages;
+              chats[chatId] = mergeChatThreads(chats[chatId] || [], cloudMessages);
               hasChanges = true;
             }
           });
@@ -1886,6 +1980,7 @@ export function subscribeToAllChats(
     }
     if (typeof window !== "undefined") {
       window.removeEventListener("eman_chat_message_received", handleDirectChatEvent);
+      window.removeEventListener("eman_chat_messages_read", handleReadEvent);
       window.removeEventListener("storage", handleStorage);
     }
     if (unsubFirestore) {

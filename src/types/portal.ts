@@ -24,6 +24,8 @@ export interface ParentChatMessage {
   timestamp: number;
   timeFormatted: string;
   isRead: boolean;
+  status?: "SENT" | "DELIVERED" | "READ";
+  senderRole?: "supervisor" | "parent";
 }
 
 export interface AdminPortalSettings {

@@ -279,10 +279,8 @@ export default function App() {
     }
 
     // 1. Immediately pull latest cloud state if device was turned off/offline
-    pullLatestCloudDataImmediately().catch(() => {});
-    // 2. Automatically send whatever was saved on local disk to Cloud if pending
-    autoPushLocalDiskOnStartup().catch(() => {});
-    // 3. Connect to Zero-Latency Realtime SSE Multi-Device Stream (<30ms instant updates, 0 quota)
+    pullLatestCloudDataImmediately(true).catch(() => {});
+    // 2. Connect to Zero-Latency Realtime SSE Multi-Device Stream (<30ms instant updates, 0 quota)
     const unsubRealtimeSync = initOnlineRealtimeSync();
 
     return () => {

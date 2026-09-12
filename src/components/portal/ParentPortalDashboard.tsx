@@ -252,6 +252,13 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       // If parent is viewing chat tab, mark admin messages as read
       if (activeTab === "chat") {
         markChatThreadRead(activeStudent.barcode, "parent");
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.sender === "admin" && (!m.isRead || m.status !== "READ")
+              ? { ...m, isRead: true, status: "READ" }
+              : m
+          )
+        );
       }
     });
 
@@ -265,12 +272,19 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
     if (activeTab === "chat") {
       chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
       markChatThreadRead(activeStudent.barcode, "parent");
+      setChatMessages((prev) =>
+        prev.map((m) =>
+          m.sender === "admin" && (!m.isRead || m.status !== "READ")
+            ? { ...m, isRead: true, status: "READ" }
+            : m
+        )
+      );
     }
-  }, [chatMessages, activeTab, activeStudent.barcode]);
+  }, [activeTab, activeStudent.barcode]);
 
   // Unread chat messages count from admin
   const unreadChatCount = useMemo(() => {
-    return chatMessages.filter((m) => m.sender === "admin" && !m.isRead).length;
+    return chatMessages.filter((m) => m.sender === "admin" && !m.isRead && m.status !== "READ").length;
   }, [chatMessages]);
 
   // Auto-subscribe to Web Push in background if permission is already granted
