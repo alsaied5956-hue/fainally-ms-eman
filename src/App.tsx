@@ -89,7 +89,7 @@ import { MultiDeviceSyncModal } from "./components/MultiDeviceSyncModal";
 import { BulkHomeworkModal } from "./components/BulkHomeworkModal";
 import { HomeworkTrackerTab } from "./components/HomeworkTrackerTab";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./utils/liveEventStream";
-import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide-react";
+import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send, Cloud } from "lucide-react";
 import { PortalMasterApp } from "./components/portal/PortalMasterApp";
 import { deleteParentAccount, syncParentAccountsFromCloud } from "./utils/portalStorage";
 import { PWAUpdateNotification } from "./components/portal/PWAUpdateNotification";
@@ -248,6 +248,7 @@ export default function App() {
     return d?.gradeWhatsAppLinks || {};
   });
   const [isWhatsAppOutboxOpen, setIsWhatsAppOutboxOpen] = useState<boolean>(false);
+  const [isCloudHydrating, setIsCloudHydrating] = useState<boolean>(() => students.length === 0);
 
   // Print PDF Modal State
   const [printModal, setPrintModal] = useState<{
@@ -279,7 +280,9 @@ export default function App() {
     }
 
     // 1. Immediately pull latest cloud state if device was turned off/offline
-    pullLatestCloudDataImmediately(true).catch(() => {});
+    pullLatestCloudDataImmediately(true)
+      .then(() => setIsCloudHydrating(false))
+      .catch(() => setIsCloudHydrating(false));
     syncParentAccountsFromCloud(true).catch(() => {});
 
     // 2. Connect to Zero-Latency Realtime SSE Multi-Device Stream (<30ms instant updates, 0 quota)
@@ -356,6 +359,7 @@ export default function App() {
     const unsubscribe = subscribeToCloudData(
       (cloudData) => {
         if (cloudData) {
+          setIsCloudHydrating(false);
           if (cloudData.students) setStudents(cloudData.students);
           if (cloudData.attendanceToday) setAttendanceToday(cloudData.attendanceToday);
           if (cloudData.attendanceHistory) setAttendanceHistory(cloudData.attendanceHistory);
@@ -372,12 +376,14 @@ export default function App() {
       },
       () => {
         // Ignored in offline fallback
+        setIsCloudHydrating(false);
       }
     );
 
     const handleLocalBroadcast = (e: Event) => {
       const customEvent = e as CustomEvent<any>;
       if (customEvent.detail) {
+        setIsCloudHydrating(false);
         // Prevent infinite re-render loop on mutations initiated within the same window
         if (customEvent.detail._originLocal) {
           return;
@@ -1586,6 +1592,22 @@ export default function App() {
   const unreadPlatformMessagesCount = useMemo(() => {
     return platformMessages.filter((m) => m.status === "pending").length;
   }, [platformMessages]);
+
+  // Loading screen while pulling authoritative cloud state if dataset is not yet hydrated
+  if (isCloudHydrating && students.length === 0) {
+    return (
+      <div dir="rtl" className="min-h-screen w-full flex flex-col items-center justify-center bg-[#070b14] text-white p-6 font-['Readex_Pro','Cairo',sans-serif]">
+        <div className="relative flex items-center justify-center mb-6">
+          <div className="w-16 h-16 rounded-full border-4 border-amber-500/20 border-t-amber-500 animate-spin" />
+          <Cloud className="w-7 h-7 text-amber-400 absolute animate-pulse" />
+        </div>
+        <h2 className="text-xl font-black text-white mb-2 tracking-tight">جاري مزامنة بيانات السنتر من السحابة الإلكترونية مباشرة...</h2>
+        <p className="text-sm text-slate-400 text-center max-w-md leading-relaxed">
+          يتم جلب البيانات السحابية الحية الموحدة لضمان مطابقة جميع الأجهزة والتليفونات بنسبة 100% بدون أي اعتماد على الذاكرة القديمة أو الديسك.
+        </p>
+      </div>
+    );
+  }
 
   // If Portal Mode is active, render the dedicated Parents & Admins Portal
   if (appViewMode === "portal") {

@@ -74,7 +74,6 @@ let deletedAccountsCache = new Set<string>();
 const STORE_PATH = path.join(process.cwd(), ".system_data_store.json");
 const ACCOUNTS_PATH = path.join(process.cwd(), ".parent_accounts_store.json");
 const DELETED_ACCOUNTS_PATH = path.join(process.cwd(), ".deleted_accounts_store.json");
-const BACKUP_PATH = path.join(process.cwd(), "src/data/centerBackup.json");
 
 function normalizePhone(val?: string | null): string {
   if (!val) return "";
@@ -93,72 +92,28 @@ export function getTodayKey(): string {
   return `${year}-${month}-${day}`;
 }
 
-// Load baseline & disk cache on module load
+// Load baseline on module load: 100% Cloud-Authoritative from Firestore
 export function initPortalStore(): void {
   try {
-    // 1. Load guaranteed original center backup (728 students, actual Egyptian data)
-    if (fs.existsSync(BACKUP_PATH)) {
-      const backupRaw = fs.readFileSync(BACKUP_PATH, "utf8");
-      const backupJson = JSON.parse(backupRaw);
-
-      systemDataCache.students = Array.isArray(backupJson.students) ? backupJson.students : [];
-      systemDataCache.attendanceHistory = backupJson.attendanceHistory || {};
-      systemDataCache.attendanceToday = backupJson.attendanceToday || {};
-      systemDataCache.scanLogTimes = backupJson.scanLogTimes || {};
-      systemDataCache.scanLogOrder = Array.isArray(backupJson.scanLogOrder) ? backupJson.scanLogOrder : [];
-      systemDataCache.payments = backupJson.payments || {};
-      systemDataCache.groupPrices = backupJson.groupPrices || {};
-      systemDataCache.usersList = Array.isArray(backupJson.usersList) ? backupJson.usersList : [];
-      systemDataCache.platformMessages = Array.isArray(backupJson.platformMessages) ? backupJson.platformMessages : [];
-      systemDataCache.gradeWhatsAppLinks = backupJson.gradeWhatsAppLinks || {};
-      systemDataCache.activeSessionSlotId = backupJson.activeSessionSlotId || "";
-
-      console.log(`[PortalStore] Initialized baseline with ${systemDataCache.students.length} students from center backup.`);
-    }
-
-    // 2. Overlay disk store if existing
+    // Delete any legacy disk store file to avoid local disk corruption
     if (fs.existsSync(STORE_PATH)) {
       try {
-        const storeRaw = fs.readFileSync(STORE_PATH, "utf8");
-        const storeJson = JSON.parse(storeRaw);
-        if (storeJson && typeof storeJson === "object") {
-          if (Array.isArray(storeJson.students) && storeJson.students.length > 0) {
-            // Merge students keeping disk additions and edits
-            const map = new Map<string, StudentRecord>();
-            systemDataCache.students.forEach((s) => map.set(String(s.barcode).trim(), s));
-            storeJson.students.forEach((s: StudentRecord) => {
-              if (s && s.barcode) map.set(String(s.barcode).trim(), s);
-            });
-            systemDataCache.students = Array.from(map.values());
-          }
-          if (storeJson.attendanceHistory) {
-            systemDataCache.attendanceHistory = { ...systemDataCache.attendanceHistory, ...storeJson.attendanceHistory };
-          }
-          if (storeJson.attendanceToday) {
-            systemDataCache.attendanceToday = { ...systemDataCache.attendanceToday, ...storeJson.attendanceToday };
-          }
-          if (storeJson.scanLogTimes) {
-            systemDataCache.scanLogTimes = { ...systemDataCache.scanLogTimes, ...storeJson.scanLogTimes };
-          }
-          if (Array.isArray(storeJson.scanLogOrder)) {
-            systemDataCache.scanLogOrder = storeJson.scanLogOrder;
-          }
-          if (storeJson.payments) {
-            systemDataCache.payments = { ...systemDataCache.payments, ...storeJson.payments };
-          }
-          if (storeJson.groupPrices) {
-            systemDataCache.groupPrices = { ...systemDataCache.groupPrices, ...storeJson.groupPrices };
-          }
-          if (storeJson.version) {
-            systemDataCache.version = Math.max(systemDataCache.version, storeJson.version);
-          }
-          console.log(`[PortalStore] Merged live disk store. Active students: ${systemDataCache.students.length}`);
-        }
-      } catch (err) {
-        console.warn("[PortalStore] Error parsing .system_data_store.json:", err);
-      }
+        fs.unlinkSync(STORE_PATH);
+      } catch {}
     }
 
+    systemDataCache.students = [];
+    systemDataCache.attendanceHistory = {};
+    systemDataCache.attendanceToday = {};
+    systemDataCache.scanLogTimes = {};
+    systemDataCache.scanLogOrder = [];
+    systemDataCache.payments = {};
+    systemDataCache.groupPrices = {};
+    systemDataCache.usersList = [];
+    systemDataCache.platformMessages = [];
+    systemDataCache.gradeWhatsAppLinks = {};
+    systemDataCache.activeSessionSlotId = "";
+    console.log("[PortalStore] Initialized clean: ready for 100% cloud hydration from Firestore.");
     // 3. Load Parent Accounts
     if (fs.existsSync(ACCOUNTS_PATH)) {
       try {
@@ -508,22 +463,22 @@ export function setSystemDataFromCloud(cloudData: any): void {
     systemDataCache.students = cloudData.students;
   }
   if (cloudData.attendanceHistory) {
-    systemDataCache.attendanceHistory = { ...systemDataCache.attendanceHistory, ...cloudData.attendanceHistory };
+    systemDataCache.attendanceHistory = cloudData.attendanceHistory;
   }
   if (cloudData.attendanceToday) {
-    systemDataCache.attendanceToday = { ...systemDataCache.attendanceToday, ...cloudData.attendanceToday };
+    systemDataCache.attendanceToday = cloudData.attendanceToday;
   }
   if (cloudData.scanLogTimes) {
-    systemDataCache.scanLogTimes = { ...systemDataCache.scanLogTimes, ...cloudData.scanLogTimes };
+    systemDataCache.scanLogTimes = cloudData.scanLogTimes;
   }
   if (Array.isArray(cloudData.scanLogOrder)) {
     systemDataCache.scanLogOrder = cloudData.scanLogOrder;
   }
   if (cloudData.payments) {
-    systemDataCache.payments = { ...systemDataCache.payments, ...cloudData.payments };
+    systemDataCache.payments = cloudData.payments;
   }
   if (cloudData.groupPrices) {
-    systemDataCache.groupPrices = { ...systemDataCache.groupPrices, ...cloudData.groupPrices };
+    systemDataCache.groupPrices = cloudData.groupPrices;
   }
   if (Array.isArray(cloudData.usersList)) {
     systemDataCache.usersList = cloudData.usersList;
@@ -532,7 +487,7 @@ export function setSystemDataFromCloud(cloudData: any): void {
     systemDataCache.platformMessages = cloudData.platformMessages;
   }
   if (cloudData.gradeWhatsAppLinks) {
-    systemDataCache.gradeWhatsAppLinks = { ...systemDataCache.gradeWhatsAppLinks, ...cloudData.gradeWhatsAppLinks };
+    systemDataCache.gradeWhatsAppLinks = cloudData.gradeWhatsAppLinks;
   }
   if (cloudData.activeSessionSlotId !== undefined) {
     systemDataCache.activeSessionSlotId = cloudData.activeSessionSlotId;

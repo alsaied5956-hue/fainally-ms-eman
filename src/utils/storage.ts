@@ -33,7 +33,6 @@ import {
   subscribeToDatabaseChanges,
   isSupabaseConfigured,
 } from "./supabaseClient";
-import centerBackup from "../data/centerBackup.json";
 
 export {
   getBatchQueueStatus,
@@ -163,18 +162,18 @@ export const DEFAULT_USERS: UserAccount[] = [
 ];
 
 export const INITIAL_SYSTEM_DATA: SystemData = {
-  students: Array.isArray(centerBackup?.students) ? (centerBackup.students as any[]) : [],
-  attendanceHistory: (centerBackup?.attendanceHistory as Record<string, Record<string, string>>) || {},
-  attendanceToday: (centerBackup?.attendanceToday as Record<string, string>) || {},
+  students: [],
+  attendanceHistory: {},
+  attendanceToday: {},
   scanLogTimes: {},
-  payments: normalizeAndMigratePayments((centerBackup as any)?.payments),
+  payments: {},
   scanLogOrder: [],
   usersList: DEFAULT_USERS,
-  groupPrices: { ...DEFAULT_GRADE_PRICES, ...((centerBackup?.groupPrices as Record<string, number>) || {}) },
+  groupPrices: { ...DEFAULT_GRADE_PRICES },
   activeSessionSlotId: "auto",
   platformMessages: [],
-  pendingWhatsAppMessages: Array.isArray(centerBackup?.pendingWhatsAppMessages) ? (centerBackup.pendingWhatsAppMessages as any[]) : [],
-  gradeWhatsAppLinks: (centerBackup?.gradeWhatsAppLinks as Record<string, string>) || {},
+  pendingWhatsAppMessages: [],
+  gradeWhatsAppLinks: {},
   deletedBarcodes: [],
   deletedPaymentKeys: [],
   deletedAttendanceKeys: [],
@@ -401,171 +400,10 @@ export function normalizeAndMigratePayments(rawPayments: any): Record<string, Re
 }
 
 /**
- * Load local data from LocalStorage immediately for zero-delay startup
+ * Pure Cloud-Authoritative: Load in-memory cloud data with zero disk corruption
  */
 export function loadLocalData(): SystemData {
   if (memoryCachedData) return memoryCachedData;
-  if (typeof window === "undefined") return INITIAL_SYSTEM_DATA;
-
-  try {
-    const raw =
-      localStorage.getItem(STORAGE_KEY) ||
-      localStorage.getItem("center_data") ||
-      localStorage.getItem("aiman_system_data");
-
-    let parsed: any = {};
-    if (raw) {
-      try {
-        parsed = JSON.parse(raw);
-      } catch (e) {
-        console.error("JSON parse error for local data:", e);
-      }
-    }
-
-    // Also check separate legacy payment storage keys if any exist
-    let legacyPayments: any = null;
-    try {
-      const pRaw =
-        localStorage.getItem("center_payments") ||
-        localStorage.getItem("payments") ||
-        localStorage.getItem("aiman_payments");
-      if (pRaw) {
-        legacyPayments = JSON.parse(pRaw);
-      }
-    } catch {}
-
-    const backupStudents = Array.isArray(centerBackup?.students) ? (centerBackup.students as any[]) : [];
-    const backupHistory = (centerBackup?.attendanceHistory as Record<string, Record<string, string>>) || {};
-    const backupToday = (centerBackup?.attendanceToday as Record<string, string>) || {};
-    const backupPrices = (centerBackup?.groupPrices as Record<string, number>) || {};
-    const backupPayments = normalizeAndMigratePayments((centerBackup as any)?.payments);
-    const backupUsers = Array.isArray((centerBackup as any)?.usersList) ? ((centerBackup as any).usersList as any[]) : [];
-    const backupLinks = ((centerBackup as any)?.gradeWhatsAppLinks as Record<string, string>) || {};
-
-    const normalizedPrimaryPayments = normalizeAndMigratePayments(parsed.payments);
-    const normalizedLegacyPayments = normalizeAndMigratePayments(legacyPayments);
-    const deletedPaymentSet = new Set((parsed.deletedPaymentKeys || []).map(String));
-
-    // Merge payments safely: primary local payments take absolute precedence over backup payments
-    const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
-    const hasParsedPayments = Boolean(parsed.payments && Object.keys(parsed.payments).length > 0);
-
-    // If no parsed payments exist, use backup payments as cold start
-    if (!hasParsedPayments) {
-      for (const [mKey, recMap] of Object.entries(backupPayments)) {
-        mergedPayments[mKey] = {};
-        for (const [bCode, rec] of Object.entries(recMap || {})) {
-          if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
-            mergedPayments[mKey][bCode] = { ...rec };
-          }
-        }
-      }
-    }
-
-    // Merge legacy payments (excluding deleted)
-    for (const [mKey, recMap] of Object.entries(normalizedLegacyPayments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      for (const [bCode, rec] of Object.entries(recMap || {})) {
-        if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
-          mergedPayments[mKey][bCode] = { ...rec };
-        }
-      }
-    }
-
-    // Merge primary parsed payments (excluding deleted)
-    for (const [mKey, recMap] of Object.entries(normalizedPrimaryPayments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      for (const [bCode, rec] of Object.entries(recMap || {})) {
-        if (!deletedPaymentSet.has(`${mKey}:${bCode}`) && Number(rec?.amount) > 0) {
-          mergedPayments[mKey][bCode] = { ...rec };
-        }
-      }
-    }
-
-    // Clean up empty months
-    for (const mKey of Object.keys(mergedPayments)) {
-      if (Object.keys(mergedPayments[mKey]).length === 0) {
-        delete mergedPayments[mKey];
-      }
-    }
-
-    const todayKey = getTodayKey();
-    let initialScanOrder: string[] = Array.isArray(parsed.scanLogOrder) ? parsed.scanLogOrder : [];
-    let initialScanTimes: Record<string, string> = parsed.scanLogTimes || {};
-
-    // Filter out scans that are from previous days so scanner always opens fresh for today
-    initialScanOrder = initialScanOrder.filter((b: string) => {
-      const timeIso = initialScanTimes[b];
-      if (typeof timeIso === "string" && timeIso.includes("T")) {
-        return timeIso.startsWith(todayKey);
-      }
-      return true;
-    });
-
-    const filteredScanTimes: Record<string, string> = {};
-    initialScanOrder.forEach((b: string) => {
-      if (initialScanTimes[b]) filteredScanTimes[b] = initialScanTimes[b];
-    });
-
-    const rawPlatformMessages: PlatformMessage[] = Array.isArray(parsed.platformMessages)
-      ? parsed.platformMessages
-      : Array.isArray(parsed.pendingWhatsAppMessages)
-      ? (parsed.pendingWhatsAppMessages as any[]).map((m) => ({
-          ...m,
-          channel: "in_app" as const,
-        }))
-      : [];
-
-    // Respect authoritative students from local storage, only using backup students if local storage has no students
-    const deletedSet = new Set((parsed.deletedBarcodes || []).map(String));
-    let finalStudents: Student[] = [];
-    if (Array.isArray(parsed.students) && parsed.students.length > 0) {
-      finalStudents = parsed.students.filter(
-        (s: any) => s && s.barcode && !deletedSet.has(String(s.barcode).trim())
-      );
-    } else if (backupStudents.length > 0) {
-      finalStudents = backupStudents.filter(
-        (s: any) => s && s.barcode && !deletedSet.has(String(s.barcode).trim())
-      );
-    }
-
-    // Merge user accounts
-    const userMap = new Map<string, UserAccount>();
-    DEFAULT_USERS.forEach((u) => userMap.set(u.username, u));
-    backupUsers.forEach((u) => userMap.set(u.username, u));
-    if (Array.isArray(parsed.usersList)) {
-      parsed.usersList.forEach((u: UserAccount) => userMap.set(u.username, u));
-    }
-    const finalUsers = Array.from(userMap.values());
-
-    const loaded: SystemData = {
-      students: finalStudents.length > 0 ? finalStudents : backupStudents,
-      attendanceHistory: {
-        ...backupHistory,
-        ...(parsed.attendanceHistory || {}),
-      },
-      attendanceToday: parsed.attendanceHistory?.[todayKey] || parsed.attendanceToday || backupToday || {},
-      scanLogTimes: filteredScanTimes,
-      payments: mergedPayments,
-      scanLogOrder: initialScanOrder,
-      usersList: finalUsers,
-      groupPrices: { ...DEFAULT_GRADE_PRICES, ...backupPrices, ...(parsed.groupPrices || {}) },
-      activeSessionSlotId: parsed.activeSessionSlotId || "auto",
-      platformMessages: rawPlatformMessages,
-      pendingWhatsAppMessages: Array.isArray(parsed.pendingWhatsAppMessages) ? parsed.pendingWhatsAppMessages : [],
-      gradeWhatsAppLinks: { ...backupLinks, ...(parsed.gradeWhatsAppLinks || {}) },
-      deletedBarcodes: Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [],
-      deletedPaymentKeys: Array.isArray(parsed.deletedPaymentKeys) ? parsed.deletedPaymentKeys : [],
-      scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
-      updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),
-    };
-    memoryCachedData = loaded;
-    return loaded;
-  } catch (e) {
-    console.error("Error loading local data:", e);
-  }
-
-  memoryCachedData = INITIAL_SYSTEM_DATA;
   return INITIAL_SYSTEM_DATA;
 }
 
@@ -1153,232 +991,32 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   );
   const deletedAttSet = new Set(deletedAttendanceKeys);
 
-  // 1. Merge Students (keyed by barcode and normalized name)
-  const studentMap = new Map<string, Student>();
-  const nameToBarcodeMap = new Map<string, string>();
+  // 1. Authoritative Cloud Students: 100% reflection of cloud state
+  const mergedStudents: Student[] = Array.isArray(cloud.students)
+    ? cloud.students
+    : (local.students || []);
 
-  const normalizeName = (name: string) => (name || "").trim().toLowerCase().replace(/\s+/g, " ");
+  // 2. Authoritative Attendance History & Today
+  const mergedHistory: Record<string, Record<string, string>> = cloud.attendanceHistory || local.attendanceHistory || {};
+  const mergedToday: Record<string, string> = cloud.attendanceToday || local.attendanceToday || {};
 
-  // Seed with local students, excluding any deleted barcodes
-  (local.students || []).forEach((s) => {
-    if (s?.barcode) {
-      const bKey = String(s.barcode).trim();
-      if (deletedSet.has(bKey)) return;
-      studentMap.set(bKey, { ...s });
-      const normName = normalizeName(s.name);
-      if (normName) {
-        nameToBarcodeMap.set(`${normName}_${s.groupGrade}`, bKey);
-      }
-    }
-  });
-
-  // Check if local student database was explicitly cleared on this machine
-  const isLocalExplicitlyEmpty = (local.students?.length === 0 && (local.deletedBarcodes?.length || 0) > 0);
-
-  // Merge remote students from cloud without ever dropping any student!
-  if (Array.isArray(cloud.students) && !isLocalExplicitlyEmpty) {
-    cloud.students.forEach((remoteStudent) => {
-      if (!remoteStudent?.barcode) return;
-      const bKey = String(remoteStudent.barcode).trim();
-      if (deletedSet.has(bKey)) return; // Never resurrect deleted students!
-
-      const normName = normalizeName(remoteStudent.name);
-      const nameKey = `${normName}_${remoteStudent.groupGrade}`;
-
-      let existingKey = bKey;
-      if (!studentMap.has(bKey) && normName && nameToBarcodeMap.has(nameKey)) {
-        existingKey = nameToBarcodeMap.get(nameKey)!;
-      }
-
-      const existing = studentMap.get(existingKey);
-      if (!existing) {
-        // Safe addition: retain remote student created on any other device
-        studentMap.set(bKey, { ...remoteStudent });
-        if (normName) {
-          nameToBarcodeMap.set(nameKey, bKey);
-        }
-      } else {
-        // Merge student properties intelligently with CRDT timestamp rules
-        const localStudentTime = parseTimestamp(existing.updatedAt || localTime);
-        const remoteStudentTime = parseTimestamp(remoteStudent.updatedAt || cloudTime);
-        const isRemoteNewer = remoteStudentTime > localStudentTime;
-
-        // The newer record is primary and authoritative
-        const primary = isRemoteNewer ? remoteStudent : existing;
-        const secondary = isRemoteNewer ? existing : remoteStudent;
-
-        studentMap.set(existingKey, {
-          ...secondary,
-          ...primary,
-          name: primary.name || secondary.name,
-          groupGrade: primary.groupGrade || secondary.groupGrade,
-          barcode: existing.barcode || remoteStudent.barcode,
-          phone: primary.phone !== undefined ? primary.phone : (secondary.phone || ""),
-          parentPhone: primary.parentPhone !== undefined ? primary.parentPhone : (secondary.parentPhone || ""),
-          notes: primary.notes !== undefined ? primary.notes : (secondary.notes || ""),
-          groupDays: primary.groupDays || secondary.groupDays,
-          discountReason: primary.discountReason !== undefined ? primary.discountReason : (secondary.discountReason || ""),
-          customMonthlyFee: primary.customMonthlyFee !== undefined ? primary.customMonthlyFee : secondary.customMonthlyFee,
-          points: primary.points !== undefined ? primary.points : (secondary.points || 0),
-          totalAttendanceDays: primary.totalAttendanceDays !== undefined ? primary.totalAttendanceDays : (secondary.totalAttendanceDays || 0),
-          totalAbsentDays: primary.totalAbsentDays !== undefined ? primary.totalAbsentDays : (secondary.totalAbsentDays || 0),
-          totalExamScores: Array.isArray(primary.totalExamScores) ? primary.totalExamScores : (Array.isArray(secondary.totalExamScores) ? secondary.totalExamScores : []),
-          lastExamTitle: primary.lastExamTitle !== undefined ? primary.lastExamTitle : (secondary.lastExamTitle || ""),
-          lastExamScore: primary.lastExamScore !== undefined ? primary.lastExamScore : (secondary.lastExamScore || ""),
-          updatedAt: Math.max(localStudentTime, remoteStudentTime),
-        });
-      }
-    });
-  }
-
-  const mergedStudents = Array.from(studentMap.values());
-
-  // 2. Merge Attendance History & Today with tombstone protection
-  // Cloud attendance is the primary authoritative source of truth across all devices
-  const mergedHistory: Record<string, Record<string, string>> = {};
-
-  // Populate from cloud attendanceHistory first
-  if (cloud.attendanceHistory) {
-    for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-      mergedHistory[dateKey] = {};
-      for (const [bCode, status] of Object.entries(remoteDayMap || {})) {
-        if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
-          mergedHistory[dateKey][bCode] = status;
-        }
-      }
-    }
-  }
-
-  // Overlay from local attendanceHistory
-  if (local.attendanceHistory) {
-    for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
-      if (!mergedHistory[dateKey]) {
-        mergedHistory[dateKey] = {};
-      }
-      for (const [bCode, status] of Object.entries(dayMap || {})) {
-        if (!deletedAttSet.has(`${dateKey}:${bCode}`) && !deletedSet.has(bCode)) {
-          if (!mergedHistory[dateKey][bCode] || localTime >= cloudTime) {
-            mergedHistory[dateKey][bCode] = status;
-          }
-        }
-      }
-    }
-  }
-
-  // Merge today's attendance: union cloud and local today's attendance
-  let mergedToday: Record<string, string> = {};
-  if (cloud.attendanceToday) {
-    for (const [bCode, status] of Object.entries(cloud.attendanceToday)) {
-      if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
-        mergedToday[bCode] = status;
-      }
-    }
-  }
-  if (local.attendanceToday) {
-    for (const [bCode, status] of Object.entries(local.attendanceToday)) {
-      if (!deletedAttSet.has(`${todayKey}:${bCode}`) && !deletedSet.has(bCode)) {
-        if (!mergedToday[bCode] || localTime >= cloudTime) {
-          mergedToday[bCode] = status;
-        }
-      }
-    }
-  }
-
-  mergedHistory[todayKey] = {
-    ...(mergedHistory[todayKey] || {}),
-    ...mergedToday,
-  };
-
-  // 3. Merge Scan Log Order & Times
-  const remoteOrder = Array.isArray(cloud.scanLogOrder) ? cloud.scanLogOrder : [];
-  const localOrder = Array.isArray(local.scanLogOrder) ? local.scanLogOrder : [];
-  const combinedScanTimes: Record<string, string> = {
-    ...(local.scanLogTimes || {}),
-    ...(cloud.scanLogTimes || {}),
-  };
-
+  // 3. Authoritative Scan Log Order & Times
   const localScanTime = parseTimestamp(local.scanLogUpdatedAt || local.updatedAt);
   const cloudScanTime = parseTimestamp(cloud.scanLogUpdatedAt || cloud.updatedAt);
+  const mergedOrder: string[] = Array.isArray(cloud.scanLogOrder)
+    ? cloud.scanLogOrder
+    : (local.scanLogOrder || []);
+  const mergedScanTimes: Record<string, string> = cloud.scanLogTimes || local.scanLogTimes || {};
 
-  const orderSet = new Set<string>();
-  const baseOrder = cloudScanTime >= localScanTime ? [...remoteOrder, ...localOrder] : [...localOrder, ...remoteOrder];
-  const preMergedOrder: string[] = [];
+  // 4. Authoritative Payments
+  const mergedPayments: Record<string, Record<string, PaymentRecord>> = cloud.payments || local.payments || {};
 
-  baseOrder.forEach((barcode) => {
-    if (barcode && !orderSet.has(barcode) && !deletedSet.has(barcode)) {
-      orderSet.add(barcode);
-      preMergedOrder.push(barcode);
-    }
-  });
-
-  const mergedOrder = preMergedOrder.filter((barcode) => {
-    const timeIso = combinedScanTimes[barcode];
-    if (typeof timeIso === "string" && timeIso.includes("T")) {
-      return timeIso.startsWith(todayKey);
-    }
-    return true;
-  });
-
-  const mergedScanTimes: Record<string, string> = {};
-  mergedOrder.forEach((barcode) => {
-    if (combinedScanTimes[barcode]) {
-      mergedScanTimes[barcode] = combinedScanTimes[barcode];
-    }
-  });
-
-  // 4. Merge Payments (Cloud is authoritative base, union non-conflicting local offline payments)
-  const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
-
-  if (cloud.payments) {
-    for (const [mKey, remoteRecords] of Object.entries(cloud.payments)) {
-      mergedPayments[mKey] = {};
-      if (remoteRecords && typeof remoteRecords === "object") {
-        for (const [bCode, remoteRec] of Object.entries(remoteRecords)) {
-          if (!remoteRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
-          if (Number(remoteRec.amount) > 0) {
-            mergedPayments[mKey][bCode] = { ...remoteRec };
-          }
-        }
-      }
-    }
-  }
-
-  if (local.payments) {
-    for (const [mKey, records] of Object.entries(local.payments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      if (records && typeof records === "object") {
-        for (const [bCode, localRec] of Object.entries(records)) {
-          if (!localRec || deletedPaymentSet.has(`${mKey}:${bCode}`)) continue;
-          if (!mergedPayments[mKey][bCode] && Number(localRec.amount) > 0) {
-            mergedPayments[mKey][bCode] = { ...localRec };
-          }
-        }
-      }
-    }
-  }
-
-  // Purge any deleted payments or zero-amount payments and clean empty months
-  for (const mKey of Object.keys(mergedPayments)) {
-    for (const bCode of Object.keys(mergedPayments[mKey])) {
-      if (deletedPaymentSet.has(`${mKey}:${bCode}`) || Number(mergedPayments[mKey][bCode]?.amount) <= 0) {
-        delete mergedPayments[mKey][bCode];
-      }
-    }
-    if (Object.keys(mergedPayments[mKey]).length === 0) {
-      delete mergedPayments[mKey];
-    }
-  }
-
-  // 5. Merge Users & Config
+  // 5. Authoritative Users & Config
   const mergedUsers = (Array.isArray(cloud.usersList) && cloud.usersList.length > 0)
     ? cloud.usersList
-    : local.usersList;
+    : (local.usersList || DEFAULT_USERS);
 
-  const mergedGroupPrices = {
-    ...DEFAULT_GRADE_PRICES,
-    ...(local.groupPrices || {}),
-    ...(cloud.groupPrices || {}),
-  };
+  const mergedGroupPrices = cloud.groupPrices || local.groupPrices || { ...DEFAULT_GRADE_PRICES };
 
   // 6. Merge In-App Platform Messages and WhatsApp Outbox Messages
   const platformMsgMap = new Map<string, PlatformMessage>();
