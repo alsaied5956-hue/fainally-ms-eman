@@ -69,9 +69,11 @@ let systemDataCache: SystemDataCache = {
 };
 
 let parentAccountsCache: Record<string, ParentAccountRecord> = {};
+let deletedAccountsCache = new Set<string>();
 
 const STORE_PATH = path.join(process.cwd(), ".system_data_store.json");
 const ACCOUNTS_PATH = path.join(process.cwd(), ".parent_accounts_store.json");
+const DELETED_ACCOUNTS_PATH = path.join(process.cwd(), ".deleted_accounts_store.json");
 const BACKUP_PATH = path.join(process.cwd(), "src/data/centerBackup.json");
 
 function normalizePhone(val?: string | null): string {
@@ -165,6 +167,18 @@ export function initPortalStore(): void {
         console.log(`[PortalStore] Loaded ${Object.keys(parentAccountsCache).length} parent accounts.`);
       } catch {}
     }
+
+    // 4. Load Deleted Accounts Tombstones
+    if (fs.existsSync(DELETED_ACCOUNTS_PATH)) {
+      try {
+        const delRaw = fs.readFileSync(DELETED_ACCOUNTS_PATH, "utf8");
+        const arr = JSON.parse(delRaw);
+        if (Array.isArray(arr)) {
+          deletedAccountsCache = new Set(arr.map((x) => String(x).trim()));
+          console.log(`[PortalStore] Loaded ${deletedAccountsCache.size} deleted accounts tombstones.`);
+        }
+      } catch {}
+    }
   } catch (err) {
     console.error("[PortalStore] Init error:", err);
   }
@@ -193,6 +207,19 @@ export function persistAccountsDebounced(): void {
       fs.writeFileSync(ACCOUNTS_PATH, JSON.stringify(parentAccountsCache), "utf8");
     } catch (e) {
       console.warn("[PortalStore] Failed saving .parent_accounts_store.json:", e);
+    }
+  }, 1000);
+}
+
+let saveDeletedTimeout: NodeJS.Timeout | null = null;
+export function persistDeletedAccountsDebounced(): void {
+  if (saveDeletedTimeout) clearTimeout(saveDeletedTimeout);
+  saveDeletedTimeout = setTimeout(() => {
+    saveDeletedTimeout = null;
+    try {
+      fs.writeFileSync(DELETED_ACCOUNTS_PATH, JSON.stringify(Array.from(deletedAccountsCache)), "utf8");
+    } catch (e) {
+      console.warn("[PortalStore] Failed saving .deleted_accounts_store.json:", e);
     }
   }, 1000);
 }
@@ -480,9 +507,17 @@ export function getAllParentAccounts(): Record<string, ParentAccountRecord> {
   return parentAccountsCache;
 }
 
+export function getDeletedAccountBarcodes(): string[] {
+  return Array.from(deletedAccountsCache);
+}
+
 export function saveParentAccountRecord(account: ParentAccountRecord): ParentAccountRecord {
   const bCode = String(account.studentBarcode).trim();
   const nowIso = new Date().toISOString();
+
+  // Clear from deleted tombstones if re-activated or saved
+  deletedAccountsCache.delete(bCode);
+  persistDeletedAccountsDebounced();
 
   const existing = parentAccountsCache[bCode];
   const updated: ParentAccountRecord = {
@@ -496,9 +531,9 @@ export function saveParentAccountRecord(account: ParentAccountRecord): ParentAcc
   parentAccountsCache[bCode] = updated;
   persistAccountsDebounced();
 
-  // Broadcast account state change
+  // Broadcast account state change over SSE stream to ALL clients (supervisors & parents)
   broadcastPortalSSE({
-    type: "account_status_changed",
+    type: "ACCOUNT_SAVED",
     barcode: bCode,
     status: updated.status,
     account: updated,
@@ -510,17 +545,28 @@ export function saveParentAccountRecord(account: ParentAccountRecord): ParentAcc
 
 export function deleteParentAccountRecord(barcode: string): boolean {
   const bCode = String(barcode).trim();
+  if (!bCode) return false;
+
+  // Track barcode as deleted tombstone so all syncing devices purge it
+  deletedAccountsCache.add(bCode);
+  persistDeletedAccountsDebounced();
+
+  let existed = false;
   if (parentAccountsCache[bCode]) {
     delete parentAccountsCache[bCode];
     persistAccountsDebounced();
-    broadcastPortalSSE({
-      type: "account_deleted",
-      barcode: bCode,
-      timestamp: Date.now(),
-    });
-    return true;
+    existed = true;
   }
-  return false;
+
+  // Instant broadcast to ALL connected mobile and desktop devices (<30ms, 0 quota)
+  broadcastPortalSSE({
+    type: "ACCOUNT_DELETED",
+    barcode: bCode,
+    reason: "تم حذف هذا الحساب من قِبل إدارة المنظومة.",
+    timestamp: Date.now(),
+  });
+
+  return existed;
 }
 
 // ----------------------------------------------------

@@ -91,7 +91,7 @@ import { HomeworkTrackerTab } from "./components/HomeworkTrackerTab";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./utils/liveEventStream";
 import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide-react";
 import { PortalMasterApp } from "./components/portal/PortalMasterApp";
-import { deleteParentAccount } from "./utils/portalStorage";
+import { deleteParentAccount, syncParentAccountsFromCloud } from "./utils/portalStorage";
 import { PWAUpdateNotification } from "./components/portal/PWAUpdateNotification";
 import { initOnlineRealtimeSync } from "./utils/onlineRealtimeSync";
 
@@ -280,11 +280,25 @@ export default function App() {
 
     // 1. Immediately pull latest cloud state if device was turned off/offline
     pullLatestCloudDataImmediately(true).catch(() => {});
+    syncParentAccountsFromCloud(true).catch(() => {});
+
     // 2. Connect to Zero-Latency Realtime SSE Multi-Device Stream (<30ms instant updates, 0 quota)
     const unsubRealtimeSync = initOnlineRealtimeSync();
 
+    // 3. Re-sync whenever device comes online or tab is resumed
+    const handleOnlineResume = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        pullLatestCloudDataImmediately(true).catch(() => {});
+        syncParentAccountsFromCloud(true).catch(() => {});
+      }
+    };
+    window.addEventListener("online", handleOnlineResume);
+    document.addEventListener("visibilitychange", handleOnlineResume);
+
     return () => {
       unsubRealtimeSync();
+      window.removeEventListener("online", handleOnlineResume);
+      document.removeEventListener("visibilitychange", handleOnlineResume);
     };
   }, []);
 

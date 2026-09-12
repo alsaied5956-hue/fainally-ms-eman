@@ -12,6 +12,7 @@ import {
   getLocalParentAccounts,
   saveLocalParentAccounts,
   getSavedPortalSession,
+  savePortalSession,
 } from "./portalStorage";
 import { playPortalAudioChime } from "./portalNotifications";
 
@@ -332,12 +333,33 @@ function handleRealtimeEvent(event: any): void {
   }
 
   // 4. ACCOUNT SAVED OR ACTIVATED: Remote account registration / activation
-  if (event.type === "ACCOUNT_SAVED" || event.type === "ACCOUNT_ACTIVATED") {
+  if (
+    event.type === "ACCOUNT_SAVED" ||
+    event.type === "ACCOUNT_ACTIVATED" ||
+    event.type === "account_status_changed"
+  ) {
     const acc = event.account as ParentAccount | undefined;
-    const barcode = event.barcode || acc?.studentBarcode;
-    if (barcode && acc) {
+    const barcode = String(event.barcode || acc?.studentBarcode || "").trim();
+    if (barcode) {
       const accounts = getLocalParentAccounts();
-      accounts[barcode] = acc;
+      const existing = accounts[barcode];
+      const updatedAcc: ParentAccount = acc
+        ? { ...existing, ...acc, status: (acc.status || event.status || "active") as any }
+        : {
+            studentBarcode: barcode,
+            linkedBarcodes: existing?.linkedBarcodes || [barcode],
+            parentPhone: existing?.parentPhone || "",
+            password: existing?.password || "1234",
+            status: ((event.status || "active") as any),
+            createdAt: existing?.createdAt || new Date().toISOString(),
+            activatedAt: existing?.activatedAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+
+      if (event.status) {
+        updatedAcc.status = event.status as any;
+      }
+      accounts[barcode] = updatedAcc;
       saveLocalParentAccounts(accounts);
 
       if (typeof window !== "undefined") {
@@ -345,7 +367,7 @@ function handleRealtimeEvent(event: any): void {
           new CustomEvent("eman_account_activated", {
             detail: {
               barcode,
-              account: acc,
+              account: updatedAcc,
             },
           })
         );
@@ -354,13 +376,31 @@ function handleRealtimeEvent(event: any): void {
     return;
   }
 
-  // 5. ACCOUNT REVOKED OR DELETED: Supervisor deleted account
-  if (event.type === "ACCOUNT_REVOKED" || event.type === "ACCOUNT_DELETED") {
-    const barcode = event.barcode;
+  // 5. ACCOUNT REVOKED OR DELETED: Supervisor deleted account on any device
+  if (
+    event.type === "ACCOUNT_REVOKED" ||
+    event.type === "ACCOUNT_DELETED" ||
+    event.type === "account_deleted"
+  ) {
+    const barcode = String(event.barcode || "").trim();
     if (barcode) {
       const accounts = getLocalParentAccounts();
       delete accounts[barcode];
       saveLocalParentAccounts(accounts);
+
+      // Instant remote logout if this device is logged in with this account
+      const session = getSavedPortalSession();
+      if (
+        session?.role === "parent" &&
+        (String(session.barcode).trim() === barcode ||
+          String(session.account?.studentBarcode).trim() === barcode ||
+          session.account?.linkedBarcodes?.includes(barcode))
+      ) {
+        savePortalSession(null);
+        try {
+          localStorage.removeItem("eman_portal_session");
+        } catch {}
+      }
 
       if (typeof window !== "undefined") {
         window.dispatchEvent(

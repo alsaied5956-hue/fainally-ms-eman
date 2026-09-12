@@ -244,7 +244,7 @@ let lastAccountsSyncTime = 0;
 export async function syncParentAccountsFromCloud(force: boolean = false): Promise<Record<string, ParentAccount>> {
   const local = getLocalParentAccounts();
   const now = Date.now();
-  if (!force && now - lastAccountsSyncTime < 5000 && Object.keys(local).length > 0) {
+  if (!force && now - lastAccountsSyncTime < 3000 && Object.keys(local).length > 0) {
     return local;
   }
   if (syncAccountsInFlight) {
@@ -258,10 +258,48 @@ export async function syncParentAccountsFromCloud(force: boolean = false): Promi
         if (resp.ok) {
           const json = await resp.json();
           if (json?.success && json?.accounts && typeof json.accounts === "object") {
-            const merged = { ...local, ...json.accounts };
-            saveLocalParentAccounts(merged);
+            const serverAccounts = json.accounts as Record<string, ParentAccount>;
+            const deletedSet = new Set<string>([
+              ...(Array.isArray(json.deletedBarcodes) ? json.deletedBarcodes : []),
+              ...(Array.isArray(json.revokedBarcodes) ? json.revokedBarcodes : []),
+            ]);
+
+            const reconciled: Record<string, ParentAccount> = {};
+
+            // A. Include all valid accounts from authoritative server
+            for (const [b, acc] of Object.entries(serverAccounts)) {
+              const bCode = String(b).trim();
+              if (!bCode || deletedSet.has(bCode) || acc.status === "deleted") continue;
+              reconciled[bCode] = acc;
+            }
+
+            // B. Reconcile local accounts: remove deleted ones, keep only active ones that were recently modified offline (<10s)
+            for (const [b, acc] of Object.entries(local)) {
+              const bCode = String(b).trim();
+              if (!bCode || deletedSet.has(bCode) || acc.status === "deleted") {
+                continue; // Purge deleted account from local
+              }
+              if (!reconciled[bCode]) {
+                const createdTime = acc.createdAt ? new Date(acc.createdAt).getTime() : 0;
+                if (Date.now() - createdTime < 10000 && acc.status === "active") {
+                  reconciled[bCode] = acc;
+                  persistParentAccount(acc).catch(() => {});
+                }
+              }
+            }
+
+            saveLocalParentAccounts(reconciled);
             lastAccountsSyncTime = Date.now();
-            return merged;
+
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("eman_account_activated", {
+                  detail: { accounts: reconciled },
+                })
+              );
+            }
+
+            return reconciled;
           }
         }
       } catch {
@@ -272,42 +310,47 @@ export async function syncParentAccountsFromCloud(force: boolean = false): Promi
       try {
         const sbAccounts = await fetchPortalAccountsFromSupabase();
         if (sbAccounts && typeof sbAccounts === "object" && Object.keys(sbAccounts).length > 0) {
-          const merged = { ...local, ...sbAccounts };
-          saveLocalParentAccounts(merged);
+          const reconciled: Record<string, ParentAccount> = {};
+          for (const [b, acc] of Object.entries(sbAccounts)) {
+            const bCode = String(b).trim();
+            if (bCode && acc && acc.status !== "deleted") {
+              reconciled[bCode] = acc;
+            }
+          }
+          saveLocalParentAccounts(reconciled);
           lastAccountsSyncTime = Date.now();
-          return merged;
+          return reconciled;
         }
       } catch {}
 
       await ensureFirebaseAuth();
       if (db) {
-        let merged = { ...local };
-        let hasChanges = false;
-
-        // 2. Fetch system_state registry
+        // 3. Fetch system_state registry
         try {
           const regSnap = await getDoc(doc(db, "system_state", "portal_accounts_registry"));
           if (regSnap.exists()) {
             const regData = regSnap.data()?.accounts as Record<string, ParentAccount> | undefined;
-            if (regData) {
-              merged = { ...merged, ...regData };
-              hasChanges = true;
+            if (regData && typeof regData === "object") {
+              const reconciled: Record<string, ParentAccount> = {};
+              for (const [b, acc] of Object.entries(regData)) {
+                const bCode = String(b).trim();
+                if (bCode && acc && acc.status !== "deleted") {
+                  reconciled[bCode] = acc;
+                }
+              }
+              saveLocalParentAccounts(reconciled);
+              lastAccountsSyncTime = Date.now();
+              return reconciled;
             }
           }
         } catch {}
-
-        if (hasChanges) {
-          saveLocalParentAccounts(merged);
-        }
-        lastAccountsSyncTime = Date.now();
-        return merged;
       }
     } catch (err) {
       console.warn("Could not fetch cloud parent accounts:", err);
     } finally {
       syncAccountsInFlight = null;
     }
-    return local;
+    return getLocalParentAccounts();
   })();
   return syncAccountsInFlight;
 }
@@ -559,19 +602,12 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
     const writes: Promise<any>[] = [
       setDoc(
         doc(db, "system_state", "portal_accounts_registry"),
-        { accounts, updatedAt: nowIso },
-        { merge: true }
+        { accounts, updatedAt: nowIso }
       ),
     ];
 
     for (const b of allBarcodesToRevoke) {
-      writes.push(
-        setDoc(
-          doc(db, "parent_accounts", b),
-          { studentBarcode: b, status: "deleted", deletedAt: nowIso, reason: revokeReason },
-          { merge: true }
-        )
-      );
+      writes.push(deleteDoc(doc(db, "parent_accounts", b)).catch(() => {}));
       writes.push(
         setDoc(doc(db, "account_revocations", b), {
           barcode: b,
@@ -603,11 +639,20 @@ export function subscribeToAllParentAccounts(
   const initial = getLocalParentAccounts();
   onUpdate(initial);
 
-  const mergeAndNotify = (incoming: Record<string, ParentAccount>) => {
+  const mergeAndNotify = (incoming: Record<string, ParentAccount>, isFullSet: boolean = false) => {
     if (isCancelled) return;
     const current = getLocalParentAccounts();
     let hasChanges = false;
     const merged = { ...current };
+
+    if (isFullSet) {
+      for (const bCode of Object.keys(current)) {
+        if (!incoming[bCode]) {
+          delete merged[bCode];
+          hasChanges = true;
+        }
+      }
+    }
 
     for (const [barcode, acc] of Object.entries(incoming)) {
       const bCode = String(barcode).trim();
@@ -615,7 +660,7 @@ export function subscribeToAllParentAccounts(
       const existing = current[bCode];
 
       if (acc.status === "deleted") {
-        if (existing && existing.status !== "deleted") {
+        if (existing) {
           delete merged[bCode];
           hasChanges = true;
         }
@@ -714,7 +759,7 @@ export function subscribeToAllParentAccounts(
             if (snap.exists()) {
               const regAccounts = snap.data()?.accounts as Record<string, ParentAccount> | undefined;
               if (regAccounts) {
-                mergeAndNotify(regAccounts);
+                mergeAndNotify(regAccounts, true);
               }
             }
           },
@@ -776,6 +821,7 @@ export function subscribeToAllParentAccounts(
 
   if (typeof window !== "undefined") {
     window.addEventListener("focus", refreshOnResume);
+    window.addEventListener("online", refreshOnResume);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         refreshOnResume();
@@ -1287,7 +1333,18 @@ export async function batchActivateParentAccounts(
     );
   }
 
-  // 3. Parallel non-blocking cloud persistence
+  // 3. Fast Express Server Background Persistence & SSE Broadcast (<5ms)
+  if (typeof window !== "undefined") {
+    for (const acc of activatedList) {
+      fetch("/api/portal/account-save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(acc),
+      }).catch(() => {});
+    }
+  }
+
+  // 4. Parallel non-blocking cloud persistence
   ensureFirebaseAuth()
     .then(async () => {
       if (!db) return;

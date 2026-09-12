@@ -52,6 +52,7 @@ import {
   getSystemETag,
   updateSystemDataPartial,
   getAllParentAccounts,
+  getDeletedAccountBarcodes,
   saveParentAccountRecord,
   deleteParentAccountRecord,
   registerPortalSSEClient,
@@ -664,7 +665,13 @@ app.get("/api/device/stream", (req, res) => {
 // Parent Accounts Sync & Save
 app.get("/api/portal/accounts-sync", (_req, res) => {
   applyZeroCacheHeaders(res);
-  return res.json({ success: true, accounts: getAllParentAccounts() });
+  return res.json({
+    success: true,
+    accounts: getAllParentAccounts(),
+    deletedBarcodes: getDeletedAccountBarcodes(),
+    revokedBarcodes: Array.from(revokedAccountsCache.keys()),
+    timestamp: Date.now(),
+  });
 });
 
 app.post("/api/portal/account-save", (req, res) => {
@@ -912,6 +919,10 @@ app.post("/api/account-revoke", (req, res) => {
     }
     const cleanBarcode = String(barcode).trim();
     const reasonText = reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.";
+
+    // Remove from in-memory portalStore & mark as deleted tombstone
+    deleteParentAccountRecord(cleanBarcode);
+
     const item: RevokedAccountRecord = {
       barcode: cleanBarcode,
       reason: reasonText,
@@ -921,11 +932,18 @@ app.post("/api/account-revoke", (req, res) => {
     revokedAccountsCache.set(cleanBarcode, item);
     persistRevokedAccounts();
 
-    console.log(`[Revocation Engine] Account revoked: ${cleanBarcode}. Broadcasting to ${sseClients.size} SSE connections.`);
+    console.log(`[Revocation Engine] Account revoked & deleted: ${cleanBarcode}. Broadcasting to ${sseClients.size} SSE connections.`);
 
     // Instant SSE broadcast to all active mobile phone sessions
     broadcastAccountEvent({
       type: "ACCOUNT_REVOKED",
+      barcode: cleanBarcode,
+      reason: reasonText,
+      timestamp: Date.now(),
+    });
+
+    broadcastPortalSSE({
+      type: "ACCOUNT_DELETED",
       barcode: cleanBarcode,
       reason: reasonText,
       timestamp: Date.now(),
@@ -959,6 +977,14 @@ app.post("/api/account-activate", (req, res) => {
     revokedAccountsCache.delete(cleanBarcode);
     persistRevokedAccounts();
 
+    const allAccs = getAllParentAccounts();
+    let acc = allAccs[cleanBarcode];
+    if (acc) {
+      acc.status = "active";
+      acc.activatedAt = new Date().toISOString();
+      saveParentAccountRecord(acc);
+    }
+
     console.log(`[Revocation Engine] Account activated/unrevoked: ${cleanBarcode}.`);
 
     broadcastAccountEvent({
@@ -967,7 +993,15 @@ app.post("/api/account-activate", (req, res) => {
       timestamp: Date.now(),
     });
 
-    return res.json({ success: true, barcode: cleanBarcode });
+    broadcastPortalSSE({
+      type: "ACCOUNT_ACTIVATED",
+      barcode: cleanBarcode,
+      status: "active",
+      account: acc || null,
+      timestamp: Date.now(),
+    });
+
+    return res.json({ success: true, barcode: cleanBarcode, account: acc || null });
   } catch (err: any) {
     console.error("account-activate error:", err);
     return res.status(500).json({ error: err.message || "Failed to activate account" });
@@ -1525,10 +1559,24 @@ app.post("/api/portal/admin/accounts/:barcode/activate", authenticateSupervisor,
   try {
     const barcode = String(req.params.barcode).trim();
     const allAccs = getAllParentAccounts();
-    const acc = allAccs[barcode];
+    let acc = allAccs[barcode];
     if (acc) {
       acc.status = "active";
       acc.activatedAt = new Date().toISOString();
+      saveParentAccountRecord(acc);
+    } else {
+      // Find student to construct default active account record
+      const sys = getSystemCache();
+      const st = sys.students?.find((s) => String(s.barcode).trim() === barcode);
+      acc = {
+        studentBarcode: barcode,
+        studentName: st?.name || barcode,
+        parentPhone: st?.parentPhone || "",
+        password: "1234",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        activatedAt: new Date().toISOString(),
+      };
       saveParentAccountRecord(acc);
     }
 
@@ -1541,9 +1589,17 @@ app.post("/api/portal/admin/accounts/:barcode/activate", authenticateSupervisor,
       timestamp: Date.now(),
     });
 
+    broadcastPortalSSE({
+      type: "ACCOUNT_ACTIVATED",
+      barcode,
+      status: "active",
+      account: acc,
+      timestamp: Date.now(),
+    });
+
     recordOutboxEvent("account", barcode, "UPDATED", { status: "active" });
 
-    return res.json({ success: true, barcode, status: "active" });
+    return res.json({ success: true, barcode, status: "active", account: acc });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -1588,6 +1644,13 @@ app.delete("/api/portal/admin/accounts/:barcode", authenticateSupervisor, (req, 
 
     broadcastAccountEvent({
       type: "ACCOUNT_REVOKED",
+      barcode,
+      reason,
+      timestamp: Date.now(),
+    });
+
+    broadcastPortalSSE({
+      type: "ACCOUNT_DELETED",
       barcode,
       reason,
       timestamp: Date.now(),
