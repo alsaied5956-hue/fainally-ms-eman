@@ -5,7 +5,9 @@ import {
   saveToLocalStorage,
   notifyCloudDataListeners,
   mergeCloudDataWithLocal,
+  pullLatestCloudDataImmediately,
 } from "./storage";
+import { getTodayKey } from "./helpers";
 import {
   getLocalChatMessages,
   saveLocalChatMessages,
@@ -53,6 +55,95 @@ export async function notifyOtherDevicesOfSystemUpdate(data: Partial<SystemData>
       }),
     }).catch(() => {});
   } catch {}
+}
+
+export function broadcastLiveScan(scanData: {
+  barcode: string;
+  status: string;
+  timeIso?: string;
+  timeDisplay?: string;
+  studentName?: string;
+  grade?: string;
+  days?: string;
+  scannedBy?: string;
+}): void {
+  if (typeof window === "undefined" || !navigator.onLine) return;
+  fetch("/api/portal/live-scan", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": CLIENT_ID,
+    },
+    body: JSON.stringify({
+      ...scanData,
+      _lastClientId: CLIENT_ID,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+}
+
+export function broadcastLivePayment(paymentData: {
+  barcode: string;
+  monthKey: string;
+  paymentRecord?: any;
+  action: "record" | "delete";
+}): void {
+  if (typeof window === "undefined" || !navigator.onLine) return;
+  fetch("/api/portal/live-payment", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": CLIENT_ID,
+    },
+    body: JSON.stringify({
+      ...paymentData,
+      _lastClientId: CLIENT_ID,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+}
+
+export function broadcastLiveStudent(studentData: {
+  action: "add" | "update" | "delete";
+  barcode: string;
+  student?: any;
+}): void {
+  if (typeof window === "undefined" || !navigator.onLine) return;
+  fetch("/api/portal/live-student", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": CLIENT_ID,
+    },
+    body: JSON.stringify({
+      ...studentData,
+      _lastClientId: CLIENT_ID,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+}
+
+export function broadcastLiveGroupFinished(groupData: {
+  grade: string;
+  days: string;
+  absentBarcodes: string[];
+  lateBarcodes: string[];
+  presentBarcodes: string[];
+  dateKey: string;
+}): void {
+  if (typeof window === "undefined" || !navigator.onLine) return;
+  fetch("/api/portal/live-group-finished", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-client-id": CLIENT_ID,
+    },
+    body: JSON.stringify({
+      ...groupData,
+      _lastClientId: CLIENT_ID,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
 }
 
 /**
@@ -186,12 +277,18 @@ function handleRealtimeEvent(event: any): void {
       } catch (err) {
         console.warn("Error merging real-time system data:", err);
       }
+    } else {
+      // Lightweight notification sent: pull fresh unified cloud state immediately
+      pullLatestCloudDataImmediately(true).catch(() => {});
     }
     return;
   }
 
   // 2. LIVE SCAN: Teacher/Supervisor scanned student attendance barcode
   if (event.type === "scan") {
+    if (event.clientId && event.clientId === CLIENT_ID) {
+      return;
+    }
     const { barcode, status, timeIso, studentName } = event;
     if (barcode && status) {
       try {
@@ -201,11 +298,16 @@ function handleRealtimeEvent(event: any): void {
           barcode,
           ...current.scanLogOrder.filter((b) => b !== barcode),
         ].slice(0, 200);
+        const updatedScanTimes = { ...(current.scanLogTimes || {}) };
+        if (timeIso) {
+          updatedScanTimes[barcode] = timeIso;
+        }
 
         const updated: SystemData = {
           ...current,
           attendanceToday: updatedAttendance,
           scanLogOrder: updatedScanLog,
+          scanLogTimes: updatedScanTimes,
           updatedAt: Date.now(),
         };
 
@@ -225,6 +327,121 @@ function handleRealtimeEvent(event: any): void {
           );
         }
       } catch {}
+    }
+    return;
+  }
+
+  // 3. LIVE PAYMENT: Instant payment record across all teacher & supervisor screens
+  if (event.type === "payment") {
+    if (event.clientId && event.clientId === CLIENT_ID) {
+      return;
+    }
+    const { barcode, monthKey, paymentRecord, action } = event;
+    if (barcode && monthKey) {
+      try {
+        const current = loadLocalData();
+        const payments = { ...(current.payments || {}) };
+        if (!payments[monthKey]) payments[monthKey] = {};
+        if (action === "delete") {
+          delete payments[monthKey][barcode];
+        } else if (paymentRecord) {
+          payments[monthKey][barcode] = paymentRecord;
+        }
+        const updated: SystemData = {
+          ...current,
+          payments,
+          updatedAt: Date.now(),
+        };
+        saveToLocalStorage(updated, false);
+        notifyCloudDataListeners(updated);
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+        }
+      } catch (err) {
+        console.warn("Error updating real-time payment:", err);
+      }
+    }
+    return;
+  }
+
+  // 4. LIVE STUDENT MUTATION: Instant student add / edit / delete
+  if (event.type === "student_mutation") {
+    if (event.clientId && event.clientId === CLIENT_ID) {
+      return;
+    }
+    const { action, student, barcode } = event;
+    const bCode = String(barcode || student?.barcode || "").trim();
+    if (bCode) {
+      try {
+        const current = loadLocalData();
+        let students = [...(current.students || [])];
+        if (action === "delete") {
+          students = students.filter((s) => String(s.barcode).trim() !== bCode);
+        } else if (student) {
+          const idx = students.findIndex((s) => String(s.barcode).trim() === bCode);
+          if (idx !== -1) {
+            students[idx] = { ...students[idx], ...student };
+          } else {
+            students.unshift(student);
+          }
+        }
+        const updated: SystemData = {
+          ...current,
+          students,
+          updatedAt: Date.now(),
+        };
+        saveToLocalStorage(updated, false);
+        notifyCloudDataListeners(updated);
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+        }
+      } catch (err) {
+        console.warn("Error updating real-time student:", err);
+      }
+    }
+    return;
+  }
+
+  // 5. LIVE GROUP FINISHED: Teacher finalized session for grade & days
+  if (event.type === "group_finished") {
+    if (event.clientId && event.clientId === CLIENT_ID) {
+      return;
+    }
+    const { absentBarcodes = [], lateBarcodes = [], presentBarcodes = [], dateKey } = event;
+    try {
+      const current = loadLocalData();
+      const history = { ...(current.attendanceHistory || {}) };
+      const today = { ...(current.attendanceToday || {}) };
+      if (!history[dateKey]) history[dateKey] = {};
+      const todayKey = getTodayKey();
+      const isToday = dateKey === todayKey;
+
+      absentBarcodes.forEach((b: string) => {
+        history[dateKey][b] = "غائب";
+        if (isToday) today[b] = "غائب";
+      });
+      lateBarcodes.forEach((b: string) => {
+        history[dateKey][b] = "تأخير";
+        if (isToday) today[b] = "تأخير";
+      });
+      presentBarcodes.forEach((b: string) => {
+        history[dateKey][b] = "حضور";
+        if (isToday) today[b] = "حضور";
+      });
+
+      const updated: SystemData = {
+        ...current,
+        attendanceHistory: history,
+        attendanceToday: today,
+        updatedAt: Date.now(),
+      };
+      saveToLocalStorage(updated, false);
+      notifyCloudDataListeners(updated);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+      }
+    } catch (err) {
+      console.warn("Error updating real-time group finished:", err);
     }
     return;
   }

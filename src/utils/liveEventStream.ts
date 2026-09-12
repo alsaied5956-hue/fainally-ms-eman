@@ -110,6 +110,20 @@ export async function pushLiveAttendanceEvent(
     } catch {}
   }
 
+  // Instant real-time multi-device broadcast over SSE (<30ms, zero refresh needed)
+  if (typeof window !== "undefined") {
+    fetch("/api/portal/live-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        barcode: String(studentId).trim(),
+        status,
+        timeIso: new Date(timestamp).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", hour12: true }),
+        timestamp,
+      }),
+    }).catch(() => {});
+  }
+
   if (writeToFirestore) {
     pendingLiveEventsQueue.push(event);
     processLiveEventsQueue().catch(() => {});
@@ -130,6 +144,20 @@ export async function pushLiveAttendanceBatch(
     status: e.status,
     timestamp: e.timestamp || Date.now(),
   }));
+
+  // Instant multi-device broadcast to all other open phones/tablets (<30ms)
+  if (typeof window !== "undefined") {
+    fetch("/api/portal/live-group-finished", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        absentBarcodes: mapped.filter((e) => e.status === "غائب").map((e) => e.studentId),
+        lateBarcodes: mapped.filter((e) => e.status === "تأخير").map((e) => e.studentId),
+        presentBarcodes: mapped.filter((e) => e.status === "حضور").map((e) => e.studentId),
+        dateKey: new Date().toISOString().split("T")[0],
+      }),
+    }).catch(() => {});
+  }
 
   pendingLiveEventsQueue.push(...mapped);
   processLiveEventsQueue().catch(() => {});

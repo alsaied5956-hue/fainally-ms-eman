@@ -65,10 +65,17 @@ import {
   getDeviceIsolatedLiveData,
   registerDeviceSSEClient,
   broadcastDeviceSSE,
+  recordLivePayment,
+  recordLiveStudentMutation,
+  recordLiveGroupFinished,
 } from "./server/portalStore";
+import { initFirestoreSync, pushServerStateToFirestore } from "./server/firestoreSync";
 
 const fbApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 const db = getFirestore(fbApp, (firebaseConfig as any).firestoreDatabaseId || undefined);
+
+// Start bidirectional Firestore synchronization immediately
+initFirestoreSync(db);
 
 const app = express();
 const PORT = 3000;
@@ -482,13 +489,84 @@ app.post("/api/portal/system-sync", (req, res) => {
       registerOrUpdateDeviceState(deviceId, {}, req.ip);
     }
     // Instantly broadcast to ALL connected supervisor screens over SSE (<30ms, zero Firestore quota)
+    // Send compact event so mobile browser EventSource never overflows buffer
     broadcastPortalSSE({
       type: "SYSTEM_DATA_UPDATED",
       clientId,
-      data: req.body,
+      version: getSystemCache().version,
+      studentsCount: getSystemCache().students.length,
       timestamp: Date.now(),
     });
+
+    // Push state to Firestore asynchronously so cloud is always unified
+    pushServerStateToFirestore(db, req.body).catch(() => {});
+
     return res.json({ success: true, timestamp: Date.now() });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Dedicated Realtime Mutation Endpoints for Zero-Refresh Multi-Device Synchronization
+app.post("/api/portal/live-payment", (req, res) => {
+  try {
+    const { barcode, monthKey, paymentRecord, action = "record" } = req.body;
+    const clientId = (req.headers["x-client-id"] as string) || req.body._lastClientId;
+    recordLivePayment({ barcode, monthKey, paymentRecord, action });
+    broadcastPortalSSE({
+      type: "payment",
+      clientId,
+      barcode,
+      monthKey,
+      paymentRecord,
+      action,
+      timestamp: Date.now(),
+    });
+    pushServerStateToFirestore(db).catch(() => {});
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/portal/live-student", (req, res) => {
+  try {
+    const { action = "update", student, barcode } = req.body;
+    const clientId = (req.headers["x-client-id"] as string) || req.body._lastClientId;
+    recordLiveStudentMutation({ action, student, barcode });
+    broadcastPortalSSE({
+      type: "student_mutation",
+      clientId,
+      action,
+      student,
+      barcode,
+      timestamp: Date.now(),
+    });
+    pushServerStateToFirestore(db).catch(() => {});
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/portal/live-group-finished", (req, res) => {
+  try {
+    const { grade, days, absentBarcodes = [], lateBarcodes = [], presentBarcodes = [], dateKey } = req.body;
+    const clientId = (req.headers["x-client-id"] as string) || req.body._lastClientId;
+    recordLiveGroupFinished({ grade, days, absentBarcodes, lateBarcodes, presentBarcodes, dateKey });
+    broadcastPortalSSE({
+      type: "group_finished",
+      clientId,
+      grade,
+      days,
+      absentBarcodes,
+      lateBarcodes,
+      presentBarcodes,
+      dateKey,
+      timestamp: Date.now(),
+    });
+    pushServerStateToFirestore(db).catch(() => {});
+    return res.json({ success: true });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

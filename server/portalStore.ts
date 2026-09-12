@@ -502,6 +502,137 @@ export function updateSystemDataPartial(updates: Partial<SystemDataCache>): void
   persistStoreDebounced();
 }
 
+export function setSystemDataFromCloud(cloudData: any): void {
+  if (!cloudData || typeof cloudData !== "object") return;
+  if (Array.isArray(cloudData.students)) {
+    systemDataCache.students = cloudData.students;
+  }
+  if (cloudData.attendanceHistory) {
+    systemDataCache.attendanceHistory = { ...systemDataCache.attendanceHistory, ...cloudData.attendanceHistory };
+  }
+  if (cloudData.attendanceToday) {
+    systemDataCache.attendanceToday = { ...systemDataCache.attendanceToday, ...cloudData.attendanceToday };
+  }
+  if (cloudData.scanLogTimes) {
+    systemDataCache.scanLogTimes = { ...systemDataCache.scanLogTimes, ...cloudData.scanLogTimes };
+  }
+  if (Array.isArray(cloudData.scanLogOrder)) {
+    systemDataCache.scanLogOrder = cloudData.scanLogOrder;
+  }
+  if (cloudData.payments) {
+    systemDataCache.payments = { ...systemDataCache.payments, ...cloudData.payments };
+  }
+  if (cloudData.groupPrices) {
+    systemDataCache.groupPrices = { ...systemDataCache.groupPrices, ...cloudData.groupPrices };
+  }
+  if (Array.isArray(cloudData.usersList)) {
+    systemDataCache.usersList = cloudData.usersList;
+  }
+  if (Array.isArray(cloudData.platformMessages)) {
+    systemDataCache.platformMessages = cloudData.platformMessages;
+  }
+  if (cloudData.gradeWhatsAppLinks) {
+    systemDataCache.gradeWhatsAppLinks = { ...systemDataCache.gradeWhatsAppLinks, ...cloudData.gradeWhatsAppLinks };
+  }
+  if (cloudData.activeSessionSlotId !== undefined) {
+    systemDataCache.activeSessionSlotId = cloudData.activeSessionSlotId;
+  }
+
+  systemDataCache.version++;
+  systemDataCache.lastUpdated = Date.now();
+  persistStoreDebounced();
+}
+
+export function recordLivePayment(data: {
+  barcode: string;
+  monthKey: string;
+  paymentRecord?: any;
+  action: "record" | "delete";
+}): void {
+  const { barcode, monthKey, paymentRecord, action } = data;
+  if (!barcode || !monthKey) return;
+
+  if (!systemDataCache.payments[monthKey]) {
+    systemDataCache.payments[monthKey] = {};
+  }
+
+  if (action === "delete") {
+    delete systemDataCache.payments[monthKey][barcode];
+  } else if (paymentRecord) {
+    systemDataCache.payments[monthKey][barcode] = paymentRecord;
+  }
+
+  systemDataCache.version++;
+  systemDataCache.lastUpdated = Date.now();
+  persistStoreDebounced();
+}
+
+export function recordLiveStudentMutation(data: {
+  action: "add" | "update" | "delete";
+  barcode: string;
+  student?: StudentRecord;
+}): void {
+  const { action, barcode, student } = data;
+  const bCode = String(barcode).trim();
+  if (!bCode) return;
+
+  if (action === "delete") {
+    systemDataCache.students = systemDataCache.students.filter(
+      (s) => String(s.barcode).trim() !== bCode
+    );
+  } else if (student) {
+    const existingIndex = systemDataCache.students.findIndex(
+      (s) => String(s.barcode).trim() === bCode
+    );
+    if (existingIndex !== -1) {
+      systemDataCache.students[existingIndex] = {
+        ...systemDataCache.students[existingIndex],
+        ...student,
+      };
+    } else {
+      systemDataCache.students.unshift(student);
+    }
+  }
+
+  systemDataCache.version++;
+  systemDataCache.lastUpdated = Date.now();
+  persistStoreDebounced();
+}
+
+export function recordLiveGroupFinished(data: {
+  grade: string;
+  days: string;
+  absentBarcodes: string[];
+  lateBarcodes: string[];
+  presentBarcodes: string[];
+  dateKey: string;
+}): void {
+  const { absentBarcodes, lateBarcodes, presentBarcodes, dateKey } = data;
+  if (!systemDataCache.attendanceHistory[dateKey]) {
+    systemDataCache.attendanceHistory[dateKey] = {};
+  }
+
+  const todayKey = getTodayKey();
+  const isToday = dateKey === todayKey;
+
+  absentBarcodes.forEach((b) => {
+    systemDataCache.attendanceHistory[dateKey][b] = "غائب";
+    if (isToday) systemDataCache.attendanceToday[b] = "غائب";
+  });
+  lateBarcodes.forEach((b) => {
+    systemDataCache.attendanceHistory[dateKey][b] = "تأخير";
+    if (isToday) systemDataCache.attendanceToday[b] = "تأخير";
+  });
+  presentBarcodes.forEach((b) => {
+    systemDataCache.attendanceHistory[dateKey][b] = "حضور";
+    if (isToday) systemDataCache.attendanceToday[b] = "حضور";
+  });
+
+  systemDataCache.version++;
+  systemDataCache.lastUpdated = Date.now();
+  persistStoreDebounced();
+}
+
 // Parent Accounts Operations
 export function getAllParentAccounts(): Record<string, ParentAccountRecord> {
   return parentAccountsCache;

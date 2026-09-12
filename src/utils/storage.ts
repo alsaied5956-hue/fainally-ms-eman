@@ -516,24 +516,18 @@ export function loadLocalData(): SystemData {
         }))
       : [];
 
-    // Ensure all 728 actual students from backup are guaranteed and merged with local edits
-    const studentMap = new Map<string, any>();
-    backupStudents.forEach((s) => {
-      if (s && s.barcode) studentMap.set(String(s.barcode).trim(), s);
-    });
-    if (Array.isArray(parsed.students) && parsed.students.length > 0) {
-      parsed.students.forEach((s: any) => {
-        if (s && s.barcode) {
-          const b = String(s.barcode).trim();
-          const existing = studentMap.get(b);
-          studentMap.set(b, existing ? { ...existing, ...s } : s);
-        }
-      });
-    }
+    // Respect authoritative students from local storage, only using backup students if local storage has no students
     const deletedSet = new Set((parsed.deletedBarcodes || []).map(String));
-    const finalStudents = Array.from(studentMap.values()).filter(
-      (s) => !deletedSet.has(String(s.barcode).trim())
-    );
+    let finalStudents: Student[] = [];
+    if (Array.isArray(parsed.students) && parsed.students.length > 0) {
+      finalStudents = parsed.students.filter(
+        (s: any) => s && s.barcode && !deletedSet.has(String(s.barcode).trim())
+      );
+    } else if (backupStudents.length > 0) {
+      finalStudents = backupStudents.filter(
+        (s: any) => s && s.barcode && !deletedSet.has(String(s.barcode).trim())
+      );
+    }
 
     // Merge user accounts
     const userMap = new Map<string, UserAccount>();
