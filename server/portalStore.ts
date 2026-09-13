@@ -185,12 +185,19 @@ interface PortalClient {
   res: Response;
   barcode?: string;
   aliases: string[];
+  role: "parent" | "supervisor";
   connectedAt: number;
 }
 
 const activeClients = new Map<string, PortalClient>();
 
-export function registerPortalSSEClient(id: string, res: Response, barcode?: string, aliases: string[] = []): void {
+export function registerPortalSSEClient(
+  id: string,
+  res: Response,
+  barcode?: string,
+  aliases: string[] = [],
+  role: "parent" | "supervisor" = "parent"
+): void {
   const normBarcode = barcode ? barcode.trim() : undefined;
   const normAliases = aliases.map((a) => String(a).trim()).filter(Boolean);
 
@@ -199,11 +206,19 @@ export function registerPortalSSEClient(id: string, res: Response, barcode?: str
     res,
     barcode: normBarcode,
     aliases: normAliases,
+    role,
     connectedAt: Date.now(),
   });
 
   // Initial handshake
-  res.write(`data: ${JSON.stringify({ type: "connected", clientId: id, timestamp: Date.now() })}\n\n`);
+  res.write(
+    `data: ${JSON.stringify({
+      type: "connected",
+      clientId: id,
+      role,
+      timestamp: Date.now(),
+    })}\n\n`
+  );
 }
 
 export function unregisterPortalSSEClient(id: string): void {
@@ -212,18 +227,31 @@ export function unregisterPortalSSEClient(id: string): void {
 
 export function broadcastPortalSSE(event: { type: string; barcode?: string; [key: string]: any }): void {
   const targetBarcode = event.barcode ? String(event.barcode).trim() : null;
+  const isStudentFacingAlert =
+    event.type === "scan" ||
+    event.type === "attendance" ||
+    event.type === "exam" ||
+    event.type === "homework" ||
+    event.type === "grade";
+
   const payload = `data: ${JSON.stringify({ ...event, timestamp: Date.now() })}\n\n`;
 
   activeClients.forEach((client, id) => {
     try {
-      // If event has no target barcode, broadcast to everyone
-      // If event has barcode, match client.barcode or any linked alias
-      if (
-        !targetBarcode ||
-        !client.barcode ||
-        client.barcode === targetBarcode ||
-        client.aliases.includes(targetBarcode)
-      ) {
+      // 1. Zero-Leakage: Supervisors MUST NOT receive student-facing alerts!
+      if (client.role === "supervisor" && isStudentFacingAlert) {
+        return;
+      }
+
+      // 2. Strict targeting for student-specific events
+      if (targetBarcode) {
+        const isMatched = client.barcode === targetBarcode || client.aliases.includes(targetBarcode);
+        // Supervisors can receive non-alert sync events like SYSTEM_DATA_UPDATED or STUDENT_LIVE_EVENT for data syncing
+        if (isMatched || (client.role === "supervisor" && !isStudentFacingAlert)) {
+          client.res.write(payload);
+        }
+      } else if (!isStudentFacingAlert) {
+        // Global non-alert event (e.g. SYSTEM_DATA_UPDATED)
         client.res.write(payload);
       }
     } catch {

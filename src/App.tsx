@@ -94,6 +94,7 @@ import { PortalMasterApp } from "./components/portal/PortalMasterApp";
 import { deleteParentAccount, syncParentAccountsFromCloud } from "./utils/portalStorage";
 import { PWAUpdateNotification } from "./components/portal/PWAUpdateNotification";
 import { initOnlineRealtimeSync } from "./utils/onlineRealtimeSync";
+import { broadcastStudentLiveEvent } from "./utils/studentLiveSync";
 
 export default function App() {
   const [appViewMode, setAppViewMode] = useState<"portal" | "teacher">(() => {
@@ -1055,6 +1056,12 @@ export default function App() {
       timestamp: Date.now(),
     }).catch(console.warn);
 
+    broadcastStudentLiveEvent({
+      barcode: updatedStudent.barcode,
+      action: "update",
+      studentData: updatedStudent,
+    }).catch(console.warn);
+
     saveStudentToSupabase(updatedStudent).catch(console.warn);
   }, [students, attendanceToday, scanLogOrder, scanLogTimes]);
 
@@ -1069,6 +1076,13 @@ export default function App() {
       action: "delete",
       barcode,
       timestamp: Date.now(),
+    }).catch(console.warn);
+
+    broadcastStudentLiveEvent({
+      barcode,
+      action: "delete",
+      deletedItemType: "student",
+      reason: "تم حذف بيانات الطالب من قِبل إدارة المنظومة.",
     }).catch(console.warn);
 
     deleteStudentFromSupabase(barcode).catch(console.warn);
@@ -1184,6 +1198,16 @@ export default function App() {
       timestamp: Date.now(),
     }).catch(console.warn);
 
+    // ⚡ Realtime Scoped Push to Student/Parent Live Channel
+    broadcastStudentLiveEvent({
+      barcode,
+      action: isDeletion ? "delete" : "attendance_change",
+      deletedItemType: isDeletion ? "attendance" : undefined,
+      deletedItemId: dateKey,
+      dateKey,
+      attendanceStatus: isDeletion ? null : newStatus,
+    }).catch(console.warn);
+
     if (isDeletion) {
       deleteAttendanceFromSupabase(barcode, dateKey).catch(console.warn);
     }
@@ -1256,6 +1280,14 @@ export default function App() {
       date: today,
       note,
       recordedBy: currentUser?.username || "admin",
+    }).catch(console.warn);
+
+    // ⚡ Realtime Scoped Push to Student/Parent Live Channel
+    broadcastStudentLiveEvent({
+      barcode,
+      action: "payment_change",
+      paymentMonthKey: monthKey,
+      paymentRecord: newRecord,
     }).catch(console.warn);
   }, [payments, currentUser]);
 
@@ -1371,6 +1403,15 @@ export default function App() {
       timestamp: Date.now(),
     }).catch(console.warn);
 
+    // ⚡ Realtime Scoped Push to Student/Parent Live Channel
+    broadcastStudentLiveEvent({
+      barcode,
+      action: "delete",
+      deletedItemType: "payment",
+      deletedItemId: monthKey,
+      paymentMonthKey: monthKey,
+    }).catch(console.warn);
+
     deletePaymentFromSupabase(barcode, monthKey).catch(console.warn);
   }, [payments]);
 
@@ -1420,6 +1461,14 @@ export default function App() {
       points: updatedStudent?.points,
       updatedScores: updatedStudent?.totalExamScores,
       timestamp: Date.now(),
+    }).catch(console.warn);
+
+    // ⚡ Realtime Scoped Push to Student/Parent Live Channel
+    broadcastStudentLiveEvent({
+      barcode,
+      action: "exam_change",
+      examTitle,
+      examScore: scoreFormatted,
     }).catch(console.warn);
 
     // 🔔 Native Background Web Push: Delivers to parent phone even if app is closed

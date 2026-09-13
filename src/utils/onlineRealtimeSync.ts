@@ -632,4 +632,17 @@ function handleRealtimeEvent(event: any): void {
     }
     return;
   }
+
+  // 6. SCOPED STUDENT LIVE EVENT: 0ms real-time event directly for a student
+  if (event.type === "STUDENT_LIVE_EVENT" && event.event) {
+    const liveEv = event.event;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("student-live-event", {
+          detail: liveEv,
+        })
+      );
+    }
+    return;
+  }
 }

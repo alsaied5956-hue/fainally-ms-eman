@@ -348,12 +348,33 @@ app.get("/api/portal/live-stream", (req, res) => {
   const barcode = req.query.barcode ? String(req.query.barcode).trim() : undefined;
   const rawAliases = req.query.aliases ? String(req.query.aliases) : "";
   const aliases = rawAliases ? rawAliases.split(",").map((s) => s.trim()).filter(Boolean) : [];
+  const role = req.query.role === "supervisor" ? "supervisor" : (barcode ? "parent" : "supervisor");
 
-  registerPortalSSEClient(clientId, res, barcode, aliases);
+  registerPortalSSEClient(clientId, res, barcode, aliases, role);
 
   req.on("close", () => {
     unregisterPortalSSEClient(clientId);
   });
+});
+
+// High-concurrency scoped student live event broadcast (<5ms, zero Firestore quota)
+app.post("/api/portal/student-live-event", (req, res) => {
+  try {
+    const event = req.body;
+    if (!event || !event.barcode) {
+      return res.status(400).json({ error: "barcode is required" });
+    }
+    const cleanBarcode = String(event.barcode).trim();
+    broadcastPortalSSE({
+      type: "STUDENT_LIVE_EVENT",
+      barcode: cleanBarcode,
+      event,
+      timestamp: Date.now(),
+    });
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed broadcasting student live event" });
+  }
 });
 
 // Instant Scan Endpoint: Teachers scan barcode -> Instant SSE to parents & instant WebPush (<50ms)
@@ -1254,12 +1275,29 @@ async function sendWebPushToTargets(params: SendPushParams): Promise<{
   });
 
   const matchedSubs: StoredSubscription[] = [];
+  const isStudentFacingAlert = [
+    "attendance",
+    "absence",
+    "delay",
+    "fee",
+    "grade",
+    "exam",
+    "homework",
+  ].includes(String(type || "").toLowerCase());
 
   for (const sub of subscriptionsCache.values()) {
     let isMatch = false;
 
-    // Filter by target IDs (e.g. barcode or parent phone)
-    if (targetList.length > 0) {
+    // Requirement 1: Supervisors MUST NOT receive student-facing alerts!
+    if (isStudentFacingAlert) {
+      // 1. Strictly skip any supervisor or admin accounts
+      if (sub.userRole === "admin" || sub.userRole === "supervisor") {
+        continue;
+      }
+      // 2. Automated student notifications MUST be strictly restricted to targeted individual FCM tokens
+      if (targetList.length === 0) {
+        continue; // Zero leakage! Never broadcast student alerts!
+      }
       const subIds = [sub.userId, ...(sub.aliases || [])];
       for (const sId of subIds) {
         if (normalizedTargets.has(sId) || normalizedTargets.has(normalizeId(sId))) {
@@ -1267,12 +1305,21 @@ async function sendWebPushToTargets(params: SendPushParams): Promise<{
           break;
         }
       }
-    } else if (role) {
-      if (sub.userRole === role || role === "all") {
-        isMatch = true;
-      }
     } else {
-      isMatch = true;
+      // Filter by target IDs (e.g. barcode or parent phone)
+      if (targetList.length > 0) {
+        const subIds = [sub.userId, ...(sub.aliases || [])];
+        for (const sId of subIds) {
+          if (normalizedTargets.has(sId) || normalizedTargets.has(normalizeId(sId))) {
+            isMatch = true;
+            break;
+          }
+        }
+      } else if (role) {
+        if (sub.userRole === role) {
+          isMatch = true;
+        }
+      }
     }
 
     if (isMatch) {

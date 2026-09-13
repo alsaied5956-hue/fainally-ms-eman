@@ -37,6 +37,7 @@ import { printElement } from "../../utils/print";
 import { loadLocalData } from "../../utils/storage";
 import { PWAInstallButton } from "./PWAInstallButton";
 import { NotificationPermissionModal } from "./NotificationPermissionModal";
+import { subscribeToStudentLiveBarcode, executeInstantRemoteLogout } from "../../utils/studentLiveSync";
 import {
   User,
   Users,
@@ -366,6 +367,31 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
       }
     }
   }, [activeStudent.barcode, account.parentPhone, account.studentBarcode, account.linkedBarcodes]);
+
+  // ⚡ Scoped Realtime Live Sync: Listens directly to `/students_live/{barcode}`
+  // 0ms instant deletion purge, remote logout, and record updates without global quota consumption
+  useEffect(() => {
+    if (!activeStudent?.barcode) return;
+
+    const unsub = subscribeToStudentLiveBarcode(activeStudent.barcode, (ev) => {
+      // 1. Instant Remote Logout on Account Revocation or Student Deletion
+      if (ev.action === "account_revoked" || (ev.action === "delete" && ev.deletedItemType === "student")) {
+        executeInstantRemoteLogout(ev.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+        return;
+      }
+
+      // 2. Instant Invalidation / Notification of record updates
+      if (ev.action === "attendance_change") {
+        playPortalAudioChime("attendance");
+      } else if (ev.action === "payment_change") {
+        playPortalAudioChime("fee");
+      }
+    });
+
+    return () => {
+      unsub();
+    };
+  }, [activeStudent?.barcode]);
 
   // Request push notification permission from modal
   const handleRequestPermissionFromModal = async (): Promise<NotificationPermission> => {

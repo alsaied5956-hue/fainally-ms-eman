@@ -13,12 +13,14 @@ import {
   isStudentPaid,
   getGroupForDate,
   isOfficialGroupDay,
+  getTodayKey,
 } from "../utils/helpers";
 import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
 import { enqueuePlatformMessagesBatch, flushPendingSyncToCloud } from "../utils/storage";
 import { pushLiveAttendanceEvent } from "../utils/liveEventStream";
 import { dispatchPushNotification } from "../services/pushNotificationService";
+import { broadcastStudentLiveEvent } from "../utils/studentLiveSync";
 import {
   broadcastLiveScan,
   saveAttendanceToSupabase,
@@ -320,6 +322,15 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         scannedBy: "الماسح",
       }),
     }).catch(() => {});
+
+    // ⚡ Realtime Scoped Student Live Channel Event
+    broadcastStudentLiveEvent({
+      barcode: student.barcode,
+      action: "attendance_change",
+      dateKey: getTodayKey(),
+      attendanceStatus: calculatedStatus,
+      studentData: student,
+    }).catch(console.warn);
 
     // 🔔 Native Background Web Push: Dispatches to parent device even when phone is locked or app is closed
     dispatchPushNotification({

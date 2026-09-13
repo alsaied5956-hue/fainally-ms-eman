@@ -32,6 +32,11 @@ service cloud.firestore {
       allow read, write, delete: if true;
     }
 
+    // High-concurrency scoped live student document (0ms real-time invalidation)
+    match /students_live/{barcode} {
+      allow read, write, delete: if true;
+    }
+
     // 4. Parents & Admins Portal collections
     match /parent_accounts/{accountId} {
       allow read, write, delete: if true;
