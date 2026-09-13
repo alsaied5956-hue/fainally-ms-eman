@@ -1,32 +1,5 @@
 [
   {
-    "userId": "01220049715",
-    "aliases": [],
-    "userRole": "parent",
-    "endpoint": "https://fcm.googleapis.com/fcm/send/cyqho0aCkaA:APA91bGFinjZ0_aE4jvIoUiFxTtq2-twzcOxD0DQQXcbnGbhvZXRnQkiGUXxoY7zg5GRCkXgRcmuHTavTM7aAvAOSrJyEcLo0M7lVeGYZhBd6yHmDF9d-63dXkYNE2uhA5orhD9ZLqBE",
-    "keys": {
-      "p256dh": "BI53_teWVu3X_A8jdY9WlYI_hcajUS6ZyoXHnaenHakwnYCYZc3QAtb8gUtXvhAMLvi6mPtbfsK52IVBaGaXoVE",
-      "auth": "ShGViBuIJmscqUNcISc6zQ"
-    },
-    "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
-    "updatedAt": 1788882301403
-  },
-  {
-    "userId": "101010",
-    "aliases": [
-      "101010",
-      "01270269381"
-    ],
-    "userRole": "parent",
-    "endpoint": "https://fcm.googleapis.com/fcm/send/cg_oX8QmRxg:APA91bFjmkZpc4hRCYTJ6efv6K1v1Xhu_d0KhtEUW3UF-_dopyWp-16CxeMcxwOw-lv0Su4wjfO5HbNoyTi6HgWrqijqStStcOBR90yNtz22NF0YcI2l_si8IGFImH7GNipDX67YpX5o",
-    "keys": {
-      "p256dh": "BLlBLX2ti7U3o3H2SSrYoFB4bll-D1CTIzD_0nyQWWkx5TOIf_WIxpDhbwK9eZoYxQmXYUwVTJkCF4mGuG3tNbk",
-      "auth": "thWTrvk1cxP79HrPSHvPAA"
-    },
-    "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
-    "updatedAt": 1788886906839
-  },
-  {
     "userId": "101175",
     "aliases": [
       "101175",
@@ -46,21 +19,6 @@
     "userId": "101010",
     "aliases": [
       "101010",
-      "01270269381"
-    ],
-    "userRole": "parent",
-    "endpoint": "https://fcm.googleapis.com/fcm/send/ccWKBurwpQk:APA91bHt8bsKskY985jESgd6IGxtI8BfrUw99MiluAn91JX7zCwIos3v7bVkYJ0qOQhKYNjbmyl9XqIz3VRnm_x9gKsOGgxaEeCgH78hib2W3cH-Q2uBOl0FlJ1wVnjG1eAH853_YFGG",
-    "keys": {
-      "p256dh": "BFf3RLD4HQsuyuWgU66mrmizG5gTLghm2D65HbCoviNAVMPuvX5bsK0q9NMkupW-zptmGbDyp1geIg3JaifOzL8",
-      "auth": "5_yRTcddyfS4nPdLObJYkA"
-    },
-    "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
-    "updatedAt": 1788914548460
-  },
-  {
-    "userId": "101010",
-    "aliases": [
-      "101010",
       "01270269381",
       "0"
     ],
@@ -72,22 +30,6 @@
     },
     "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
     "updatedAt": 1788887942154
-  },
-  {
-    "userId": "252525",
-    "aliases": [
-      "252525",
-      "01234567890",
-      "201234567890"
-    ],
-    "userRole": "parent",
-    "endpoint": "https://fcm.googleapis.com/fcm/send/fPKHraaLzzA:APA91bE5vEqUQpnC8LOgTgJbBqgo86cTP3Hr1hYR62f9DcU2_iK3M3J7lD0zoQaPzjezRx82BQpo3r497nVSkJESNVG7F63q7YH2leoB_Zq0zkf7kaVTG_AaGNOxkAWlwkAksuci0_YK",
-    "keys": {
-      "p256dh": "BMKviu2PnEDLbQx0FMMoTKkQnc7lKejWi1CqghHfKohArK54wB-IN4EMZOLguK2WH5dELPqem13klnjGigqnJd4",
-      "auth": "R4PjR7gDW8IS4bgPKlg-ww"
-    },
-    "userAgent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
-    "updatedAt": 1788914964516
   },
   {
     "userId": "252525",

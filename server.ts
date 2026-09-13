@@ -401,7 +401,7 @@ app.post("/api/portal/live-scan", async (req, res) => {
       tag: `att-${barcode}-${Date.now()}`,
       eventId: `att-${barcode}-${status}-${Date.now()}`,
       url: "/?tab=attendance",
-    }).catch((e) => console.warn("[LiveScan] Push error:", e?.message || e));
+    }).catch((e) => console.info("[LiveScan] Push notice:", e?.message || e));
 
     return res.json({ success: true, scanInfo: result.scanInfo });
   } catch (err: any) {
@@ -1149,6 +1149,58 @@ interface SendPushParams {
   sound?: string;
 }
 
+// Helper to send a single Web Push notification with automatic backoff, rate-limit throttling, and dead endpoint detection
+async function sendSingleNotificationWithRetry(
+  sub: StoredSubscription,
+  payload: string,
+  maxRetries = 2
+): Promise<{ success: boolean; isDead: boolean; statusCode?: number; error?: string }> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await webpush.sendNotification(
+        {
+          endpoint: sub.endpoint,
+          keys: sub.keys,
+        },
+        payload,
+        {
+          TTL: 86400, // 24 hours delivery guarantee by browser push service
+          urgency: "high",
+        }
+      );
+      return { success: true, isDead: false, statusCode: 201 };
+    } catch (err: any) {
+      const statusCode = Number(err?.statusCode) || 0;
+      const errMsg = String(err?.message || "");
+
+      // 1. Permanent client errors: 400 (Bad request / invalid token), 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 410 (Gone / Expired)
+      if ([400, 401, 403, 404, 410].includes(statusCode)) {
+        return { success: false, isDead: true, statusCode, error: errMsg };
+      }
+
+      // 2. Transient rate limits (429) or gateway blips (500, 502, 503, 504)
+      const isTransient = statusCode === 429 || [500, 502, 503, 504].includes(statusCode);
+
+      if (isTransient && attempt < maxRetries) {
+        let delayMs = 600 * (attempt + 1) + Math.floor(Math.random() * 250);
+        const retryAfter = err?.headers?.["retry-after"];
+        if (retryAfter) {
+          const parsedSec = parseInt(retryAfter, 10);
+          if (!isNaN(parsedSec) && parsedSec > 0 && parsedSec <= 10) {
+            delayMs = parsedSec * 1000;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      // Exhausted retries or non-transient status
+      return { success: false, isDead: false, statusCode, error: errMsg };
+    }
+  }
+  return { success: false, isDead: false };
+}
+
 async function sendWebPushToTargets(params: SendPushParams): Promise<{
   sent: number;
   failed: number;
@@ -1236,36 +1288,29 @@ async function sendWebPushToTargets(params: SendPushParams): Promise<{
   let failedCount = 0;
   const deadEndpoints: string[] = [];
 
-  await Promise.all(
-    matchedSubs.map(async (sub) => {
-      try {
-        await webpush.sendNotification(
-          {
-            endpoint: sub.endpoint,
-            keys: sub.keys,
-          },
-          payload,
-          {
-            TTL: 86400, // 24 hours delivery guarantee by browser push service
-            urgency: "high",
-            headers: {
-              Urgency: "high",
-              Priority: "u=1, i",
-            },
-          }
-        );
-        deliveredCount++;
-      } catch (err: any) {
-        failedCount++;
-        // 404 or 410 Gone means the user uninstalled or revoked permission
-        if (err.statusCode === 404 || err.statusCode === 410) {
-          deadEndpoints.push(sub.endpoint);
+  // Dispatch with controlled concurrency (chunks of 2 with spacing) to prevent gateway throttling
+  for (let i = 0; i < matchedSubs.length; i += 2) {
+    const chunk = matchedSubs.slice(i, i + 2);
+    await Promise.all(
+      chunk.map(async (sub) => {
+        const res = await sendSingleNotificationWithRetry(sub, payload);
+        if (res.success) {
+          deliveredCount++;
         } else {
-          console.warn(`[Push Error] Endpoint ${sub.endpoint.slice(0, 35)}... status:`, err.statusCode || err.message);
+          failedCount++;
+          if (res.isDead) {
+            deadEndpoints.push(sub.endpoint);
+            console.info(`[Push Notice] Expired or invalid subscription pruned (${res.statusCode || "dead"}): ${sub.endpoint.slice(0, 35)}...`);
+          } else {
+            console.info(`[Push Notice] Push delivery deferred for endpoint ${sub.endpoint.slice(0, 35)}... (status: ${res.statusCode || res.error || "unknown"})`);
+          }
         }
-      }
-    })
-  );
+      })
+    );
+    if (i + 2 < matchedSubs.length) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 
   // Clean up dead subscriptions (e.g. uninstalled or expired)
   if (deadEndpoints.length > 0) {

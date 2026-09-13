@@ -12,6 +12,7 @@ import {
   sendParentChatMessage,
   markChatThreadRead,
   subscribeToThreadChat,
+  getAdminPortalSettings,
 } from "../../utils/portalStorage";
 import {
   sendPortalNotification,
@@ -65,6 +66,9 @@ import {
   Filter,
   Eye,
   X,
+  PhoneCall,
+  Phone,
+  MessageCircle,
 } from "lucide-react";
 
 interface ParentPortalDashboardProps {
@@ -189,6 +193,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
   const [hasNotifPerm, setHasNotifPerm] = useState<boolean>(() => {
     return isNotificationSupported() && Notification.permission === "granted";
   });
+
+  // Direct Admin Call Modal state
+  const [showAdminCallModal, setShowAdminCallModal] = useState(false);
+  const supervisorSettings = useMemo(() => getAdminPortalSettings(), []);
+  const adminPhone = supervisorSettings.adminPhone || "01000000000";
 
   // Mandatory Notification Onboarding Modal (pops up at runtime if permission is not granted)
   const [showNotifModal, setShowNotifModal] = useState<boolean>(() => {
@@ -1161,10 +1170,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
         {/* TAB 1: SUMMARY DASHBOARD */}
         {activeTab === "dashboard" && (
           <div className="space-y-6 animate-fadeIn">
-            {/* Student Hero Card */}
-            <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/40 border border-amber-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
+            {/* Student Overview Card */}
+            <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/50 border-2 border-amber-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden space-y-6">
               <div className="absolute -top-12 -left-12 w-48 h-48 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
 
+              {/* Main Student Identity Header */}
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div className="flex items-center gap-4">
                   <div className="w-16 h-16 rounded-3xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-xl">
@@ -1176,11 +1186,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                         {activeStudent.name}
                       </h2>
                       <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold">
-                        كود: {activeStudent.barcode}
+                        كود الطالب: {activeStudent.barcode}
                       </span>
                     </div>
                     <p className="text-xs sm:text-sm text-slate-300 mt-1">
-                      {activeStudent.groupGrade} | المجموعة: <strong className="text-amber-400">{activeStudent.groupDays}</strong>
+                      الصف الدراسي: <strong className="text-white">{activeStudent.groupGrade || "غير محدد"}</strong> | المجموعة: <strong className="text-amber-400">{activeStudent.groupDays || "غير محدد"}</strong>
                     </p>
                   </div>
                 </div>
@@ -1196,6 +1206,104 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                       {activeStudent.points || 0}
                     </span>
                   </div>
+                </div>
+              </div>
+
+              {/* Required Core Overview Metrics Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                {/* 1. Attendance Rate % */}
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-emerald-500/30 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                      <CalendarCheck2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-400 block">معدل الحضور</span>
+                      <span className="text-sm font-extrabold text-emerald-300 font-mono">{attendanceRate}%</span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold">
+                    {realAttendanceCount} يوم حضور
+                  </span>
+                </div>
+
+                {/* 2. Payment Status */}
+                <div className={`p-3.5 rounded-2xl bg-slate-950/70 border flex items-center justify-between ${
+                  currentMonthPayment
+                    ? "border-emerald-500/30"
+                    : "border-rose-500/30"
+                }`}>
+                  <div className="flex items-center gap-2.5">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                      currentMonthPayment
+                        ? "bg-emerald-500/20 border border-emerald-500/30 text-emerald-400"
+                        : "bg-rose-500/20 border border-rose-500/30 text-rose-400"
+                    }`}>
+                      <CreditCard className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-400 block">حالة المصروفات الشهرية</span>
+                      <span className={`text-sm font-extrabold ${
+                        currentMonthPayment ? "text-emerald-300" : "text-rose-400"
+                      }`}>
+                        {currentMonthPayment ? "مدفوع بالكامل ✓" : "مستحق الدفع ✗"}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-bold">
+                    {currentMonthKey}
+                  </span>
+                </div>
+
+                {/* 3. Latest Exam Score */}
+                <div className="p-3.5 rounded-2xl bg-slate-950/70 border border-indigo-500/30 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                      <FileCheck2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-400 block">آخر نتيجة اختبار</span>
+                      <span className="text-sm font-extrabold text-indigo-300 font-mono">
+                        {activeStudent.lastExamScore || (examHistoryList.length > 0 ? examHistoryList[0].scoreStr : "لم يرصد بعد")}
+                      </span>
+                    </div>
+                  </div>
+                  {activeStudent.lastExamTitle && (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-bold truncate max-w-[100px]">
+                      {activeStudent.lastExamTitle}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Action Buttons: Direct Admin Call Button & Install App Button */}
+              <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {/* Direct Admin Call Button */}
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminCallModal(true)}
+                    className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center gap-2 shadow-lg shadow-emerald-900/30 transition cursor-pointer"
+                  >
+                    <PhoneCall className="w-4 h-4 text-emerald-200" />
+                    <span>اتصال مباشر بالمشرف</span>
+                  </button>
+
+                  {/* Direct Chat Switch Button */}
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("chat")}
+                    className="px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center gap-2 border border-slate-700 transition cursor-pointer"
+                  >
+                    <MessageSquare className="w-4 h-4 text-amber-400" />
+                    <span>مراسلة المشرف</span>
+                  </button>
+                </div>
+
+                {/* Install App Button */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400 hidden sm:inline">تطبيق الهاتف:</span>
+                  <PWAInstallButton variant="compact" />
                 </div>
               </div>
             </div>
@@ -2564,6 +2672,90 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* MODAL: DIRECT ADMIN CALL & CONTACT */}
+      {showAdminCallModal && typeof document !== "undefined" && createPortal(
+        <div
+          className="fixed inset-0 z-[999990] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md overflow-y-auto animate-fadeIn"
+          style={{ zIndex: 999990 }}
+          dir="rtl"
+        >
+          <div className="relative w-full max-w-md rounded-3xl bg-slate-900 border-2 border-emerald-500/40 p-6 shadow-2xl space-y-4 text-right my-auto">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                  <PhoneCall className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-fancy">
+                    التواصل المباشر مع إدارة المركز
+                  </h3>
+                  <p className="text-xs text-slate-300">
+                    الأستاذة إيمان الدمشيتي والمشرفين
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAdminCallModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-xl hover:bg-slate-800"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 text-center space-y-1">
+              <span className="text-xs text-slate-400 block">رقم هاتف المشرف المباشر:</span>
+              <span className="text-lg font-bold font-mono text-emerald-400 tracking-wider dir-ltr inline-block">
+                {adminPhone}
+              </span>
+            </div>
+
+            <div className="space-y-2.5 pt-2">
+              {/* Option 1: Direct phone call */}
+              <a
+                href={`tel:${adminPhone}`}
+                className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 transition cursor-pointer"
+              >
+                <Phone className="w-4 h-4" />
+                <span>اتصال هاتفي مباشر الآن</span>
+              </a>
+
+              {/* Option 2: WhatsApp chat */}
+              <a
+                href={`https://wa.me/2${adminPhone.replace(/^0/, "")}`}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-emerald-700 to-green-600 hover:from-emerald-600 hover:to-green-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-green-900/30 transition cursor-pointer"
+              >
+                <MessageCircle className="w-4 h-4" />
+                <span>محادثة واتساب سريعة</span>
+              </a>
+
+              {/* Option 3: In-app live chat */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAdminCallModal(false);
+                  setActiveTab("chat");
+                }}
+                className="w-full py-3 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+              >
+                <MessageSquare className="w-4 h-4 text-amber-400" />
+                <span>فتح المحادثة الفورية داخل البوابة</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowAdminCallModal(false)}
+              className="w-full py-2.5 rounded-2xl bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-slate-300 text-xs font-bold transition cursor-pointer"
+            >
+              إغلاق
+            </button>
           </div>
         </div>,
         document.body

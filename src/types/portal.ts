@@ -31,6 +31,7 @@ export interface ParentChatMessage {
 export interface AdminPortalSettings {
   adminBarcode: string;
   adminPassword: string;
+  adminPhone?: string;
   pushNotificationsEnabled: boolean;
   soundAlertsEnabled: boolean;
   updatedAt?: string;

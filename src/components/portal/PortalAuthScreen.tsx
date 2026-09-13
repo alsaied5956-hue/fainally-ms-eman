@@ -1,6 +1,10 @@
 import React, { useState } from "react";
 import { Student } from "../../types";
-import { registerParentAccount, authenticatePortalLogin } from "../../utils/portalStorage";
+import {
+  registerParentAccount,
+  authenticatePortalLogin,
+  verifyStudentForActivation,
+} from "../../utils/portalStorage";
 import { ParentAccount } from "../../types/portal";
 import { PWAInstallButton } from "./PWAInstallButton";
 import {
@@ -19,6 +23,7 @@ import {
   QrCode,
   BellRing,
   Smartphone,
+  Search,
 } from "lucide-react";
 
 interface PortalAuthScreenProps {
@@ -47,12 +52,42 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
   const [regPassword, setRegPassword] = useState("");
   const [regConfirmPassword, setRegConfirmPassword] = useState("");
   const [showRegPassword, setShowRegPassword] = useState(false);
+  const [verifiedStudent, setVerifiedStudent] = useState<Student | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
 
   // Status & Feedback
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isAlreadyActiveNotice, setIsAlreadyActiveNotice] = useState(false);
+
+  // Check student data against Supabase / local
+  const handleVerifyStudent = async () => {
+    if (!regBarcode.trim() || !regPhone.trim()) {
+      setErrorMsg("يرجى إدخال كود باركود الطالب ورقم الهاتف المسجل للتحقق.");
+      return;
+    }
+    setErrorMsg(null);
+    setIsVerifying(true);
+    try {
+      const res = await verifyStudentForActivation(regBarcode, regPhone, students);
+      if (res.success && res.student) {
+        setVerifiedStudent(res.student);
+        setSuccessMsg(`تم التحقق بنجاح: ${res.student.name} (${res.student.groupGrade || "طالب"})`);
+      } else {
+        setVerifiedStudent(null);
+        setErrorMsg(res.message);
+        if (res.alreadyActive) {
+          setIsAlreadyActiveNotice(true);
+          if (res.barcode) setLoginBarcode(res.barcode);
+        }
+      }
+    } catch {
+      setErrorMsg("تعذر الاتصال بقاعدة البيانات. يرجى المحاولة ثانية.");
+    } finally {
+      setIsVerifying(false);
+    }
+  };
 
   // Submit Login
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -272,7 +307,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
                   <Barcode className="w-4 h-4 text-amber-400" />
-                  <span>كود الباركود الخاص بك</span>
+                  <span>كود الطالب أو رقم الهاتف المسجل (أو 1 للمشرف)</span>
                 </label>
                 <div className="relative">
                   <input
@@ -281,7 +316,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                     dir="ltr"
                     value={loginBarcode}
                     onChange={(e) => setLoginBarcode(e.target.value)}
-                    placeholder="أدخل كود الباركود"
+                    placeholder="كود الطالب أو رقم الهاتف (أو 1 للمشرف)"
                     className="w-full px-4 py-3 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-amber-400 focus:outline-none text-white text-sm font-mono tracking-wider text-center"
                   />
                 </div>
@@ -290,7 +325,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
                   <Lock className="w-4 h-4 text-amber-400" />
-                  كلمة المرور
+                  <span>كلمة المرور (2468 للمشرف الافتراضي)</span>
                 </label>
                 <div className="relative">
                   <input
@@ -312,6 +347,10 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                 </div>
               </div>
 
+              <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
+                <span>👑 دخول المشرف: هاتف <strong className="text-amber-300 font-mono">1</strong> وكلمة المرور <strong className="text-amber-300 font-mono">2468</strong></span>
+              </div>
+
               <button
                 type="submit"
                 disabled={isLoading}
@@ -331,7 +370,7 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
             /* TAB 2: REGISTER FORM (First-time) */
             <form onSubmit={handleRegisterSubmit} className="space-y-4">
               <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 leading-relaxed">
-                💡 <strong>تفعيل حساب ولي الأمر:</strong> أدخل كود باركود الطالب ورقم هاتف ولي الأمر المسجل في المنظومة لتوثيق الهوية، ثم اختر كلمة مرور خاصة بك.
+                💡 <strong>تفعيل حساب ولي الأمر لأول مرة:</strong> أدخل كود باركود الطالب ورقم الهاتف المسجل للتحقق الفوري من قاعدة البيانات السحابية (Supabase)، ثم عيّن كلمة المرور الخاصة بك.
               </div>
 
               <div>
@@ -344,7 +383,10 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                   required
                   dir="ltr"
                   value={regBarcode}
-                  onChange={(e) => setRegBarcode(e.target.value)}
+                  onChange={(e) => {
+                    setRegBarcode(e.target.value);
+                    setVerifiedStudent(null);
+                  }}
                   placeholder="مثال: 1002"
                   className="w-full px-4 py-2.5 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-amber-400 focus:outline-none text-white text-sm font-mono text-center"
                 />
@@ -355,16 +397,43 @@ export const PortalAuthScreen: React.FC<PortalAuthScreenProps> = ({
                   <Phone className="w-4 h-4 text-amber-400" />
                   رقم الهاتف المسجل للطالب / ولي الأمر
                 </label>
-                <input
-                  type="tel"
-                  required
-                  dir="ltr"
-                  value={regPhone}
-                  onChange={(e) => setRegPhone(e.target.value)}
-                  placeholder="مثال: 01012345678"
-                  className="w-full px-4 py-2.5 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-amber-400 focus:outline-none text-white text-sm font-mono text-center"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="tel"
+                    required
+                    dir="ltr"
+                    value={regPhone}
+                    onChange={(e) => {
+                      setRegPhone(e.target.value);
+                      setVerifiedStudent(null);
+                    }}
+                    placeholder="مثال: 01012345678"
+                    className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-950/70 border border-slate-700/80 focus:border-amber-400 focus:outline-none text-white text-sm font-mono text-center"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVerifyStudent}
+                    disabled={isVerifying || !regBarcode.trim() || !regPhone.trim()}
+                    className="px-3.5 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 text-xs font-bold flex items-center gap-1.5 transition disabled:opacity-40 cursor-pointer"
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    <span>{isVerifying ? "جاري الفحص..." : "فحص وتوثيق"}</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Verified Student Confirmation Banner */}
+              {verifiedStudent && (
+                <div className="p-3.5 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs space-y-1 animate-fadeIn">
+                  <div className="flex items-center gap-2 font-bold text-emerald-200">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>تم توثيق بيانات الطالب بنجاح:</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 pr-6">
+                    الاسم: <strong className="text-white">{verifiedStudent.name}</strong> | الصف: <span className="text-amber-300">{verifiedStudent.groupGrade || "غير محدد"}</span> | المجموعة: <span className="text-amber-300">{verifiedStudent.groupDays || "غير محدد"}</span>
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>

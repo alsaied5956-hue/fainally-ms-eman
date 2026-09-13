@@ -132,6 +132,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
   );
   const [newAdminBarcode, setNewAdminBarcode] = useState(adminSettings.adminBarcode);
   const [newAdminPassword, setNewAdminPassword] = useState(adminSettings.adminPassword);
+  const [newAdminPhone, setNewAdminPhone] = useState(adminSettings.adminPhone || "01000000000");
   const [pushEnabled, setPushEnabled] = useState(adminSettings.pushNotificationsEnabled);
   const [soundEnabled, setSoundEnabled] = useState(adminSettings.soundAlertsEnabled);
   const [settingsFeedback, setSettingsFeedback] = useState<string | null>(null);
@@ -674,6 +675,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     const updated: AdminPortalSettings = {
       adminBarcode: newAdminBarcode.trim(),
       adminPassword: newAdminPassword.trim(),
+      adminPhone: newAdminPhone.trim() || "01000000000",
       pushNotificationsEnabled: pushEnabled,
       soundAlertsEnabled: soundEnabled,
       updatedAt: new Date().toISOString(),
@@ -1893,6 +1895,25 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
                       onChange={(e) => setNewAdminPassword(e.target.value)}
                       className="w-full px-4 py-2.5 rounded-2xl bg-slate-950 border border-slate-700 text-xs font-mono text-white text-center"
                     />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5 flex items-center gap-1.5">
+                      <Phone className="w-4 h-4 text-amber-400" />
+                      رقم هاتف المشرف للتواصل والاتصال المباشر من أولياء الأمور
+                    </label>
+                    <input
+                      type="tel"
+                      required
+                      dir="ltr"
+                      value={newAdminPhone}
+                      onChange={(e) => setNewAdminPhone(e.target.value)}
+                      placeholder="01012345678"
+                      className="w-full px-4 py-2.5 rounded-2xl bg-slate-950 border border-slate-700 text-xs font-mono text-white text-center"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      هذا الرقم سيظهر في بطاقة الطالب لتمكين ولي الأمر من الاتصال المباشر بالإدارة بضغطة زر واحدة.
+                    </p>
                   </div>
                 </div>
 

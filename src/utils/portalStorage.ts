@@ -10,7 +10,7 @@ import {
 } from "../types/portal";
 import { playPortalAudioChime } from "./portalNotifications";
 import { loadLocalData, isFirestoreQuotaError } from "./storage";
-import { savePortalAccountsToSupabase, fetchPortalAccountsFromSupabase } from "./supabaseClient";
+import { savePortalAccountsToSupabase, fetchPortalAccountsFromSupabase, supabase } from "./supabaseClient";
 
 // Storage Keys
 const LS_PARENT_ACCOUNTS = "eman_parent_accounts";
@@ -23,6 +23,7 @@ const LS_ADMIN_LOGS = "eman_admin_activity_log";
 export const DEFAULT_ADMIN_SETTINGS: AdminPortalSettings = {
   adminBarcode: "1",
   adminPassword: "2468",
+  adminPhone: "01000000000",
   pushNotificationsEnabled: true,
   soundAlertsEnabled: true,
 };
@@ -1068,6 +1069,124 @@ export function subscribeToParentAccountLiveStatus(
 }
 
 /**
+ * Verify student existence and parent phone match for First-Time Activation
+ * Queries Supabase `students` table with multi-layer local fallback
+ */
+export async function verifyStudentForActivation(
+  studentBarcode: string,
+  enteredPhone: string,
+  students: Student[]
+): Promise<{
+  success: boolean;
+  message: string;
+  student?: Student;
+  alreadyActive?: boolean;
+  barcode?: string;
+}> {
+  const barcodeTrimmed = studentBarcode.trim();
+  const phoneTrimmed = enteredPhone.trim();
+
+  if (!barcodeTrimmed || !phoneTrimmed) {
+    return { success: false, message: "يرجى إدخال كود باركود الطالب ورقم الهاتف المسجل." };
+  }
+
+  // 1. Check local roster first (0ms)
+  let student = students.find((s) => String(s.barcode).trim() === barcodeTrimmed);
+  if (!student) {
+    const localData = loadLocalData();
+    if (localData?.students) {
+      student = localData.students.find((s) => String(s.barcode).trim() === barcodeTrimmed);
+    }
+  }
+
+  // Numeric equivalence
+  if (!student && !isNaN(Number(barcodeTrimmed))) {
+    const num = Number(barcodeTrimmed);
+    student = students.find((s) => Number(s.barcode) === num);
+    if (!student) {
+      const localData = loadLocalData();
+      if (localData?.students) {
+        student = localData.students.find((s) => Number(s.barcode) === num);
+      }
+    }
+  }
+
+  // 2. Query Supabase `students` table directly if not found locally or to ensure authoritative sync
+  if (!student) {
+    try {
+      const { data: supaStudent } = await supabase
+        .from("students")
+        .select("*")
+        .or(`barcode.eq.${barcodeTrimmed},barcode.eq.${Number(barcodeTrimmed) || 0}`)
+        .maybeSingle();
+
+      if (supaStudent) {
+        student = {
+          id: supaStudent.id,
+          barcode: String(supaStudent.barcode),
+          name: supaStudent.name,
+          phone: supaStudent.phone || "",
+          parentPhone: supaStudent.parent_phone || supaStudent.parentPhone || "",
+          groupGrade: supaStudent.grade || supaStudent.groupGrade || "",
+          groupDays: supaStudent.group_days || supaStudent.groupDays || "",
+          points: supaStudent.points || 0,
+        } as any;
+      }
+    } catch (err) {
+      console.warn("Supabase student lookup notice:", err);
+    }
+  }
+
+  if (!student) {
+    return {
+      success: false,
+      message: "كود الطالب غير مسجل في المنظومة! يرجى التأكد من كتابة الكود بشكل صحيح أو مراجعة إدارة المركز.",
+    };
+  }
+
+  // 3. Validate phone number against student's parentPhone or student phone
+  const cleanEntered = normalizePhone(phoneTrimmed);
+  const cleanParent = normalizePhone(student.parentPhone);
+  const cleanStudentPhone = normalizePhone(student.phone);
+  const hasValidRosterPhone = (cleanParent && cleanParent.length >= 8) || (cleanStudentPhone && cleanStudentPhone.length >= 8);
+
+  if (hasValidRosterPhone) {
+    const isPhoneMatch =
+      cleanEntered &&
+      (cleanEntered === cleanParent ||
+        cleanEntered === cleanStudentPhone ||
+        (cleanParent && (cleanEntered.endsWith(cleanParent) || cleanParent.endsWith(cleanEntered))) ||
+        (cleanStudentPhone && (cleanEntered.endsWith(cleanStudentPhone) || cleanStudentPhone.endsWith(cleanEntered))));
+
+    if (!isPhoneMatch) {
+      return {
+        success: false,
+        message: `رقم الهاتف المدخل (${phoneTrimmed}) غير مطابق لرقم ولي أمر الطالب (${student.name}). يرجى إدخال الهاتف المسجل في المنظومة.`,
+      };
+    }
+  }
+
+  // 4. Check if account already exists & is active
+  const existingAccounts = getLocalParentAccounts();
+  let existing = existingAccounts[student.barcode] || existingAccounts[barcodeTrimmed];
+
+  if (existing && existing.status === "active") {
+    return {
+      success: false,
+      alreadyActive: true,
+      barcode: student.barcode,
+      message: `تم تفعيل هذا الحساب مسبقاً! يرجى التوجه لشاشة "تسجيل الدخول" واستخدام كلمة المرور المعتمدة.`,
+    };
+  }
+
+  return {
+    success: true,
+    message: `تم التحقق من بيانات الطالب (${student.name}) بنجاح! يرجى تعيين كلمة مرور جديدة للحساب.`,
+    student,
+  };
+}
+
+/**
  * Validate and register a parent for the first time (Instant 0ms validation + background sync)
  */
 export async function registerParentAccount(
@@ -1103,6 +1222,30 @@ export async function registerParentAccount(
         student = localData.students.find((s) => Number(s.barcode) === num);
       }
     }
+  }
+
+  // Fallback to Supabase `students` table query directly
+  if (!student) {
+    try {
+      const { data: supaStudent } = await supabase
+        .from("students")
+        .select("*")
+        .or(`barcode.eq.${barcodeTrimmed},barcode.eq.${Number(barcodeTrimmed) || 0}`)
+        .maybeSingle();
+
+      if (supaStudent) {
+        student = {
+          id: supaStudent.id,
+          barcode: String(supaStudent.barcode),
+          name: supaStudent.name,
+          phone: supaStudent.phone || "",
+          parentPhone: supaStudent.parent_phone || supaStudent.parentPhone || "",
+          groupGrade: supaStudent.grade || supaStudent.groupGrade || "",
+          groupDays: supaStudent.group_days || supaStudent.groupDays || "",
+          points: supaStudent.points || 0,
+        } as any;
+      }
+    } catch {}
   }
 
   if (!student) {
@@ -1527,7 +1670,32 @@ export async function linkChildToParent(
     return { success: false, message: "هذا الطالب مضاف بالفعل إلى قائمة أبنائك!" };
   }
 
-  const childStudent = students.find((s) => s.barcode === childBarcode);
+  let childStudent = students.find((s) => s.barcode === childBarcode);
+  if (!childStudent) {
+    const localData = loadLocalData();
+    childStudent = localData?.students?.find((s) => String(s.barcode).trim() === childBarcode);
+  }
+  if (!childStudent) {
+    try {
+      const { data: supaStudent } = await supabase
+        .from("students")
+        .select("*")
+        .or(`barcode.eq.${childBarcode},barcode.eq.${Number(childBarcode) || 0}`)
+        .maybeSingle();
+      if (supaStudent) {
+        childStudent = {
+          id: supaStudent.id,
+          barcode: String(supaStudent.barcode),
+          name: supaStudent.name,
+          phone: supaStudent.phone || "",
+          parentPhone: supaStudent.parent_phone || supaStudent.parentPhone || "",
+          groupGrade: supaStudent.grade || supaStudent.groupGrade || "",
+          groupDays: supaStudent.group_days || supaStudent.groupDays || "",
+          points: supaStudent.points || 0,
+        } as any;
+      }
+    } catch {}
+  }
   if (!childStudent) {
     return { success: false, message: "كود الطالب غير موجود بالنظام المدرسي." };
   }
@@ -2048,21 +2216,29 @@ export function subscribeToAllChats(
 
 /**
  * Session Persistence
+ * Enforces sessionStorage so closing the browser forces a fresh login, while supporting seamless tab refreshes
  */
 export function getSavedPortalSession(): PortalSession | null {
   try {
-    const raw = localStorage.getItem(LS_PORTAL_SESSION);
-    if (raw) return JSON.parse(raw);
+    if (typeof window !== "undefined") {
+      const raw = sessionStorage.getItem(LS_PORTAL_SESSION) || localStorage.getItem(LS_PORTAL_SESSION);
+      if (raw) return JSON.parse(raw);
+    }
   } catch {}
   return null;
 }
 
 export function savePortalSession(session: PortalSession | null): void {
   try {
-    if (session) {
-      localStorage.setItem(LS_PORTAL_SESSION, JSON.stringify(session));
-    } else {
-      localStorage.removeItem(LS_PORTAL_SESSION);
+    if (typeof window !== "undefined") {
+      if (session) {
+        sessionStorage.setItem(LS_PORTAL_SESSION, JSON.stringify(session));
+        // Remove from localStorage so closing the browser window forces fresh login
+        localStorage.removeItem(LS_PORTAL_SESSION);
+      } else {
+        sessionStorage.removeItem(LS_PORTAL_SESSION);
+        localStorage.removeItem(LS_PORTAL_SESSION);
+      }
     }
   } catch {}
 }
