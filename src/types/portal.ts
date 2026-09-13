@@ -13,6 +13,7 @@ export interface ParentAccount {
   deletedAt?: string;
   reason?: string;
   lastLoginAt?: string;
+  fcmToken?: string;
 }
 
 export interface ParentChatMessage {

@@ -24,6 +24,10 @@ import {
   getAdminActivityLogs,
   subscribeToAdminActivityLogs,
 } from "../../utils/portalStorage";
+import {
+  updateParentAccountStatusInSupabase,
+  deleteParentAccountRecordFromSupabase,
+} from "../../utils/supabaseClient";
 import { AdminActivityLog } from "../../types/portal";
 import { openWhatsApp } from "../../utils/helpers";
 import {
@@ -556,6 +560,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
     };
     // 0ms instant local update
     setAccounts((prev) => ({ ...prev, [item.barcode]: updated }));
+    updateParentAccountStatusInSupabase(item.barcode, nextStatus).catch(() => {});
     persistParentAccount(updated).catch(() => {});
 
     if (nextStatus === "disabled") {
@@ -589,6 +594,7 @@ export const AdminControlPanel: React.FC<AdminControlPanelProps> = ({
       delete next[barcode];
       return next;
     });
+    deleteParentAccountRecordFromSupabase(barcode).catch(() => {});
     deleteParentAccount(barcode).catch(() => {});
 
     // 3. Instant affirmative feedback

@@ -381,3 +381,28 @@ alter table public.push_subscriptions enable row level security;
 create policy "Allow public push subscription upsert" on public.push_subscriptions
     for all using (true) with check (true);
 
+-- ==============================================================================
+-- DEDICATED PARENT ACCOUNTS TABLE (Zero-Delay Remote Revocation & Anti-Hijacking)
+-- ==============================================================================
+create table if not exists public.parent_accounts (
+    id text primary key,                     -- Student barcode or parent account ID
+    parent_phone text not null,
+    password_hash text not null,
+    linked_student_barcodes text[] not null default '{}',
+    fcm_token text default '',
+    status text not null default 'active' check (status in ('active', 'disabled', 'suspended', 'deleted')),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_parent_accounts_phone on public.parent_accounts (parent_phone);
+create index if not exists idx_parent_accounts_status on public.parent_accounts (status);
+create index if not exists idx_parent_accounts_linked on public.parent_accounts using gin (linked_student_barcodes);
+
+alter table public.parent_accounts enable row level security;
+create policy "Allow full access on parent_accounts" on public.parent_accounts
+    for all using (true) with check (true);
+
+-- Enable Realtime publication for instant 0ms supervisor remote logout
+alter publication supabase_realtime add table public.parent_accounts;
+

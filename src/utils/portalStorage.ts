@@ -10,7 +10,16 @@ import {
 } from "../types/portal";
 import { playPortalAudioChime } from "./portalNotifications";
 import { loadLocalData, isFirestoreQuotaError } from "./storage";
-import { savePortalAccountsToSupabase, fetchPortalAccountsFromSupabase, supabase } from "./supabaseClient";
+import {
+  savePortalAccountsToSupabase,
+  fetchPortalAccountsFromSupabase,
+  supabase,
+  saveParentAccountRecordToSupabase,
+  checkBarcodeAlreadyLinkedSupabase,
+  updateParentAccountStatusInSupabase,
+  deleteParentAccountRecordFromSupabase,
+  subscribeToParentAccountSupabase,
+} from "./supabaseClient";
 
 // Storage Keys
 const LS_PARENT_ACCOUNTS = "eman_parent_accounts";
@@ -409,6 +418,7 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
 
   // If status is disabled or deleted, immediately broadcast revocation to log out parent device
   if (account.status === "disabled" || account.status === "deleted") {
+    updateParentAccountStatusInSupabase(account.studentBarcode, account.status).catch(() => {});
     logSupervisorAccountEvent(
       account.status === "disabled" ? "disable" : "delete",
       account.studentBarcode,
@@ -482,6 +492,7 @@ export async function persistParentAccount(account: ParentAccount): Promise<void
     const allAccs = getLocalParentAccounts();
     allAccs[account.studentBarcode] = account;
     savePortalAccountsToSupabase(allAccs).catch(() => {});
+    saveParentAccountRecordToSupabase(account).catch(() => {});
   } catch {}
 
   // Reliable cloud persistence tied to Firestore (Executed in parallel without blocking)
@@ -583,6 +594,8 @@ export async function deleteParentAccount(studentBarcode: string): Promise<void>
 
     // 2. High-speed Direct Server Broadcast (Sub-50ms) to trigger immediate mobile logout & cascading deletion
     try {
+      deleteParentAccountRecordFromSupabase(b).catch(() => {});
+      updateParentAccountStatusInSupabase(b, "deleted").catch(() => {});
       fetch("/api/account-revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -864,29 +877,40 @@ export function subscribeToParentAccountLiveStatus(
   let isCancelled = false;
   let hasFiredRevocation = false;
 
-  const triggerRevoke = (reason: string) => {
+  const triggerRevoke = (reason?: string) => {
     if (isCancelled || hasFiredRevocation) return;
     hasFiredRevocation = true;
 
-    // Purge local session instantly so browser / refresh cannot resurrect it
-    savePortalSession(null);
+    const finalReason = reason || "تم إلغاء تفعيل هذا الحساب من قبل الإدارة";
+
+    // Play loud acoustic alert chime immediately
     try {
-      localStorage.removeItem(LS_PORTAL_SESSION);
+      playPortalAudioChime("absence");
     } catch {}
 
-    // Fire window event for local components
+    // Purge local credentials instantly so browser / refresh cannot resurrect it
+    savePortalSession(null);
+    try {
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem(LS_PORTAL_SESSION);
+        sessionStorage.clear();
+        localStorage.removeItem(LS_PORTAL_SESSION);
+      }
+    } catch {}
+
+    // Fire window event for local components with 0ms delay
     if (typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("eman_account_revoked", {
           detail: {
             barcode: targetBarcode,
-            reason,
+            reason: finalReason,
           },
         })
       );
     }
 
-    onRevoked(reason);
+    onRevoked(finalReason);
   };
 
   // 1. Direct Server-Sent Events (SSE) Stream: sub-50ms instant remote push
@@ -901,7 +925,7 @@ export function subscribeToParentAccountLiveStatus(
           if (data?.type === "ACCOUNT_REVOKED") {
             const revBarcode = String(data.barcode).trim();
             if (revBarcode === targetBarcode) {
-              triggerRevoke(data.reason || "تم حذف هذا الحساب من قِبل إدارة المنظومة.");
+              triggerRevoke(data.reason || "تم إلغاء تفعيل هذا الحساب من قبل الإدارة");
             }
           }
         } catch {}
@@ -911,6 +935,15 @@ export function subscribeToParentAccountLiveStatus(
       };
     } catch {}
   }
+
+  // 1.5 Supabase Realtime Table Listener on parent_accounts (0ms remote supervisor logout)
+  const unsubSupabase = subscribeToParentAccountSupabase(
+    targetBarcode,
+    (status, reason) => {
+      if (isCancelled || hasFiredRevocation) return;
+      triggerRevoke(reason || "تم إلغاء تفعيل هذا الحساب من قبل الإدارة");
+    }
+  );
 
   // 2. BroadcastChannel listener (same device / multi-tab)
   const handleBusMessage = (ev: MessageEvent) => {
@@ -1063,6 +1096,7 @@ export function subscribeToParentAccountLiveStatus(
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     }
     clearInterval(pollInterval);
+    unsubSupabase();
     if (unsubscribeDoc) unsubscribeDoc();
     if (unsubscribeRevocations) unsubscribeRevocations();
   };
@@ -1166,9 +1200,21 @@ export async function verifyStudentForActivation(
     }
   }
 
-  // 4. Check if account already exists & is active
+  // 4. Check if account already exists & is active (Local + Supabase Anti-Hijack + Firestore)
   const existingAccounts = getLocalParentAccounts();
   let existing = existingAccounts[student.barcode] || existingAccounts[barcodeTrimmed];
+
+  try {
+    const hijackCheck = await checkBarcodeAlreadyLinkedSupabase(student.barcode);
+    if (hijackCheck.isLinked) {
+      return {
+        success: false,
+        alreadyActive: true,
+        barcode: student.barcode,
+        message: `⚠️ تم تفعيل هذا الحساب مسبقاً وهو مرتبط بولي أمر في المنظومة! لمنع اختراق الحسابات، لا يمكن ربطه أو إعادة تفعيله بحساب آخر. يرجى التوجه لشاشة "تسجيل الدخول" واستخدام كلمة المرور المعتمدة.`,
+      };
+    }
+  } catch {}
 
   if (existing && existing.status === "active") {
     return {
@@ -1306,14 +1352,26 @@ export async function registerParentAccount(
     }
   }
 
-  // IF ACCOUNT IS ALREADY ACTIVATED:
-  // Strictly prevent re-registration, prevent overwriting password, and prevent login!
+  // IF ACCOUNT IS ALREADY ACTIVATED (in Supabase or Firestore):
+  // Strictly prevent re-registration, prevent overwriting password, and prevent account hijacking!
+  try {
+    const hijackCheck = await checkBarcodeAlreadyLinkedSupabase(student.barcode);
+    if (hijackCheck.isLinked) {
+      return {
+        success: false,
+        alreadyActive: true,
+        barcode: student.barcode,
+        message: `⚠️ كود الطالب (${student.barcode}) مفعل ومربوط بالفعل بحساب ولي أمر معتمد! لمنع اختراق الحسابات، لا يمكن إعادة تسجيل هذا الكود. يرجى التوجه إلى شاشة "تسجيل الدخول" واستخدام كلمة المرور المعتمدة.`,
+      };
+    }
+  } catch {}
+
   if (existing && existing.status === "active") {
     return {
       success: false,
       alreadyActive: true,
       barcode: student.barcode,
-      message: `تم تفعيل هذا الحساب من قبل من قِبل إدارة المنظومة! يرجى التوجه إلى شاشة "تسجيل الدخول" وإدخال كود الطالب (${student.barcode}) وكلمة المرور المسلمة لك للدخول.`,
+      message: `تم تفعيل هذا الحساب مسبقاً من قِبل إدارة المنظومة! يرجى التوجه إلى شاشة "تسجيل الدخول" وإدخال كود الطالب (${student.barcode}) وكلمة المرور المسلمة لك للدخول.`,
     };
   }
 

@@ -1127,4 +1127,200 @@ export async function fetchPortalAccountsFromSupabase(): Promise<Record<string, 
   return null;
 }
 
+// ==============================================================================
+// DEDICATED PARENT_ACCOUNTS TABLE CRITICAL SECURITY & REALTIME INTEGRATION
+// ==============================================================================
+
+/**
+ * Upsert parent account into dedicated parent_accounts table in Supabase
+ */
+export async function saveParentAccountRecordToSupabase(account: ParentAccount): Promise<boolean> {
+  try {
+    const barcodes = account.linkedBarcodes && account.linkedBarcodes.length > 0
+      ? account.linkedBarcodes
+      : [account.studentBarcode];
+
+    const { error } = await supabase.from("parent_accounts").upsert(
+      {
+        id: account.studentBarcode,
+        parent_phone: account.parentPhone,
+        password_hash: account.password,
+        linked_student_barcodes: barcodes,
+        fcm_token: account.fcmToken || "",
+        status: account.status || "active",
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "id" }
+    );
+
+    if (error) {
+      console.warn("[Supabase parent_accounts] Upsert notice:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase parent_accounts] Error saving record:", err);
+    return false;
+  }
+}
+
+/**
+ * Check if a student barcode is already linked to an active parent account
+ * Prevents account hijacking before registration.
+ */
+export async function checkBarcodeAlreadyLinkedSupabase(
+  barcode: string
+): Promise<{ isLinked: boolean; parentPhone?: string; accountId?: string }> {
+  try {
+    const cleanBarcode = String(barcode).trim();
+    if (!cleanBarcode) return { isLinked: false };
+
+    // 1. Direct ID match
+    const { data: directAccount } = await supabase
+      .from("parent_accounts")
+      .select("id, parent_phone, status, linked_student_barcodes")
+      .eq("id", cleanBarcode)
+      .maybeSingle();
+
+    if (directAccount && directAccount.status === "active") {
+      return {
+        isLinked: true,
+        parentPhone: directAccount.parent_phone,
+        accountId: directAccount.id,
+      };
+    }
+
+    // 2. Array contains match
+    const { data: arrayMatches } = await supabase
+      .from("parent_accounts")
+      .select("id, parent_phone, status, linked_student_barcodes")
+      .contains("linked_student_barcodes", [cleanBarcode])
+      .eq("status", "active")
+      .limit(1);
+
+    if (arrayMatches && arrayMatches.length > 0) {
+      return {
+        isLinked: true,
+        parentPhone: arrayMatches[0].parent_phone,
+        accountId: arrayMatches[0].id,
+      };
+    }
+  } catch (err) {
+    console.warn("[Supabase Anti-Hijack] Link check notice:", err);
+  }
+  return { isLinked: false };
+}
+
+/**
+ * Update parent account status in Supabase (e.g. 'active', 'disabled', 'suspended', 'deleted')
+ */
+export async function updateParentAccountStatusInSupabase(
+  barcode: string,
+  status: "active" | "disabled" | "suspended" | "deleted"
+): Promise<boolean> {
+  try {
+    const cleanBarcode = String(barcode).trim();
+    const { error } = await supabase
+      .from("parent_accounts")
+      .update({
+        status,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", cleanBarcode);
+
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete parent account from Supabase
+ */
+export async function deleteParentAccountRecordFromSupabase(barcode: string): Promise<boolean> {
+  try {
+    const cleanBarcode = String(barcode).trim();
+    const { error } = await supabase
+      .from("parent_accounts")
+      .delete()
+      .eq("id", cleanBarcode);
+
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Save FCM token to parent account
+ */
+export async function updateParentAccountFCMTokenInSupabase(
+  barcode: string,
+  fcmToken: string
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from("parent_accounts")
+      .update({
+        fcm_token: fcmToken,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", barcode.trim());
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Subscribe to realtime status changes of parent_accounts table in Supabase
+ * Triggers 0ms instant remote logout when supervisor deactivates, suspends, or deletes.
+ */
+export function subscribeToParentAccountSupabase(
+  barcode: string,
+  onStatusChanged: (status: string, reason: string) => void
+): () => void {
+  const cleanBarcode = String(barcode).trim();
+  const channelName = `parent-account-live-${cleanBarcode}-${Date.now()}`;
+
+  const channel = supabase
+    .channel(channelName)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "parent_accounts",
+      },
+      (payload) => {
+        try {
+          if (payload.eventType === "DELETE") {
+            const oldRow = payload.old as any;
+            if (!oldRow || String(oldRow.id).trim() === cleanBarcode) {
+              onStatusChanged("deleted", "تم إلغاء تفعيل هذا الحساب من قبل الإدارة");
+            }
+          } else if (payload.eventType === "UPDATE") {
+            const newRow = payload.new as any;
+            if (newRow && String(newRow.id).trim() === cleanBarcode) {
+              const currentStatus = String(newRow.status || "").toLowerCase();
+              if (currentStatus !== "active") {
+                onStatusChanged(
+                  currentStatus,
+                  "تم إلغاء تفعيل هذا الحساب من قبل الإدارة"
+                );
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("[Supabase Realtime Account Watch] Handler error:", err);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 

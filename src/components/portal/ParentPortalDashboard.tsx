@@ -1,5 +1,8 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db, ensureFirebaseAuth } from "../../utils/firebase";
+import { useParentChild } from "../../contexts/ParentChildContext";
 import { Student, PaymentRecord, GroupDays, GradeName } from "../../types";
 import {
   ParentAccount,
@@ -196,8 +199,48 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   // Direct Admin Call Modal state
   const [showAdminCallModal, setShowAdminCallModal] = useState(false);
-  const supervisorSettings = useMemo(() => getAdminPortalSettings(), []);
-  const adminPhone = supervisorSettings.adminPhone || "01000000000";
+
+  // Consume ParentChildContext for 0ms in-memory child profile switching
+  const parentChild = useParentChild();
+
+  // Dynamic Real-time synchronization of supervisor phone & WhatsApp from Firebase settings node
+  const [adminPhone, setAdminPhone] = useState<string>(() => {
+    return getAdminPortalSettings().adminPhone || "01000000000";
+  });
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    ensureFirebaseAuth()
+      .then(() => {
+        if (!db) return;
+        unsubscribe = onSnapshot(
+          doc(db, "portal_settings", "admin_settings"),
+          (snap) => {
+            if (snap.exists()) {
+              const data = snap.data();
+              if (data?.adminPhone) {
+                setAdminPhone(String(data.adminPhone).trim());
+              }
+            }
+          },
+          () => {}
+        );
+      })
+      .catch(() => {});
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  // Switch active child in-memory with 0ms delay
+  const handleSelectChild = (bCode: string) => {
+    const clean = String(bCode).trim();
+    setSelectedStudentBarcode(clean);
+    if (parentChild?.switchChild) {
+      parentChild.switchChild(clean);
+    }
+  };
 
   // Mandatory Notification Onboarding Modal (pops up at runtime if permission is not granted)
   const [showNotifModal, setShowNotifModal] = useState<boolean>(() => {
@@ -208,8 +251,11 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
 
   // All linked student barcodes (primary + linked)
   const allChildBarcodes = useMemo(() => {
+    if (parentChild?.linkedBarcodes && parentChild.linkedBarcodes.length > 0) {
+      return parentChild.linkedBarcodes;
+    }
     return Array.from(new Set([account.studentBarcode, ...(account.linkedBarcodes || [])]));
-  }, [account]);
+  }, [parentChild?.linkedBarcodes, account]);
 
   // Current active child student object
   const activeStudent = useMemo(() => {
@@ -999,7 +1045,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                     <button
                       key={bCode}
                       type="button"
-                      onClick={() => setSelectedStudentBarcode(bCode)}
+                      onClick={() => handleSelectChild(bCode)}
                       className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                         isSelected
                           ? "bg-amber-500 text-slate-950 shadow-md font-extrabold"
@@ -2510,7 +2556,7 @@ export const ParentPortalDashboard: React.FC<ParentPortalDashboardProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedStudentBarcode(bCode);
+                              handleSelectChild(bCode);
                               setActiveTab("dashboard");
                             }}
                             className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition cursor-pointer"

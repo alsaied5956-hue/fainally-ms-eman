@@ -10,6 +10,7 @@ import {
 import { PortalAuthScreen } from "./PortalAuthScreen";
 import { ParentPortalDashboard } from "./ParentPortalDashboard";
 import { AdminControlPanel } from "./AdminControlPanel";
+import { ParentChildProvider } from "../../contexts/ParentChildContext";
 
 interface PortalMasterAppProps {
   students: Student[];
@@ -127,18 +128,40 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
 
   // 3. Logged in as Parent -> Show Parent Portal Dashboard
   if (session.role === "parent" && session.account) {
+    const initialStudent: Student =
+      students.find(
+        (s) => String(s.barcode).trim() === String(session.account?.studentBarcode).trim()
+      ) || {
+        barcode: session.account.studentBarcode,
+        name: session.account.studentName || `طالب (${session.account.studentBarcode})`,
+        phone: "",
+        parentPhone: session.account.parentPhone,
+        groupGrade: "الصف الرابع الابتدائي",
+        groupDays: "سبت - إثنين - أربعاء",
+        points: 0,
+        totalAttendanceDays: 0,
+        totalAbsentDays: 0,
+        totalExamScores: [],
+      };
+
     return (
-      <ParentPortalDashboard
+      <ParentChildProvider
         account={session.account}
-        students={students}
-        attendanceHistory={attendanceHistory}
-        attendanceToday={attendanceToday}
-        payments={payments}
-        scanLogTimes={scanLogTimes}
-        groupPrices={groupPrices}
-        onLogout={() => handleLogout(false)}
-        onUpdateAccount={handleUpdateAccount}
-      />
+        initialStudent={initialStudent}
+        allSystemStudents={students}
+      >
+        <ParentPortalDashboard
+          account={session.account}
+          students={students}
+          attendanceHistory={attendanceHistory}
+          attendanceToday={attendanceToday}
+          payments={payments}
+          scanLogTimes={scanLogTimes}
+          groupPrices={groupPrices}
+          onLogout={() => handleLogout(false)}
+          onUpdateAccount={handleUpdateAccount}
+        />
+      </ParentChildProvider>
     );
   }
 
