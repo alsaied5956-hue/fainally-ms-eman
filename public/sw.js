@@ -1,11 +1,10 @@
 // Service Worker for Offline & Online PWA Caching
-const CACHE_NAME = "math-center-v5.0";
+const CACHE_NAME = "math-center-v5.1";
 const ASSETS_TO_CACHE = [
   "/",
   "/index.html",
   "/manifest.json",
-  "/icon.svg",
-  "/notification.wav"
+  "/icon.svg"
 ];
 
 // Install Event: Cache critical app shell
@@ -113,9 +112,8 @@ self.addEventListener("push", (event) => {
     body: data.body,
     icon: data.icon || "/icon.svg",
     badge: data.badge || "/icon.svg",
-    vibrate: [500, 100, 500, 100, 500], // High-priority aggressive vibration pattern
-    sound: "/notification.wav", // Custom audio chime
-    silent: false, // Rings device's notification ringtone
+    vibrate: [200, 100, 200], // Standard high-priority background vibration pattern
+    silent: false, // Rings device's OS default notification chime
     renotify: true, // Alerts phone sound even if prior notification is in tray
     requireInteraction: true,
     tag: notifTag,
@@ -131,7 +129,6 @@ self.addEventListener("push", (event) => {
     data: {
       url: isChat ? "/?tab=chat" : (data.url || "/"),
       eventId: data.eventId,
-      sound: data.sound || "/notification.wav",
       timestamp: data.timestamp || Date.now()
     },
     dir: "rtl",
@@ -147,7 +144,6 @@ self.addEventListener("push", (event) => {
         notifType: data.type || "alert",
         title: data.title,
         body: data.body,
-        sound: data.sound || "/notification.wav",
       });
     });
   });
@@ -181,13 +177,13 @@ self.addEventListener("sync", (event) => {
 // Client Message Listener: allows app tabs and background sync to trigger OS notifications with phone sound
 self.addEventListener("message", (event) => {
   if (event.data && event.data.type === "SHOW_PORTAL_NOTIFICATION") {
-    const { title, body, icon, badge, url, vibrate, sound, tag, data } = event.data;
+    const { title, body, icon, badge, url, vibrate, tag, data } = event.data;
     const options = {
       body: body || "",
       icon: icon || "/icon.svg",
       badge: badge || "/icon.svg",
-      vibrate: vibrate || [300, 100, 300, 100, 400],
-      silent: false, // Ensures mobile sound rings
+      vibrate: vibrate || [200, 100, 200],
+      silent: false, // Ensures OS notification chime rings
       renotify: true,
       requireInteraction: true,
       tag: tag || `eman-${Date.now()}`,
@@ -209,7 +205,6 @@ self.addEventListener("message", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   let targetUrl = event.notification.data?.url || "/";
-  const soundUrl = event.notification.data?.sound || "/notification.wav";
 
   if (event.action === "open_chat") {
     targetUrl = "/?tab=chat";
@@ -227,7 +222,6 @@ self.addEventListener("notificationclick", (event) => {
           }
           client.postMessage({
             type: "USER_INTERACTED_PLAY_ALERT",
-            sound: soundUrl,
             url: targetUrl,
             timestamp: Date.now(),
           });
@@ -240,7 +234,6 @@ self.addEventListener("notificationclick", (event) => {
           if (newWindow) {
             newWindow.postMessage({
               type: "USER_INTERACTED_PLAY_ALERT",
-              sound: soundUrl,
               url: targetUrl,
               timestamp: Date.now(),
             });

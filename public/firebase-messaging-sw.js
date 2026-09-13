@@ -42,9 +42,8 @@ messaging.onBackgroundMessage((payload) => {
     body,
     icon: payload.notification?.icon || payload.data?.icon || "/icon.svg",
     badge: "/icon.svg",
-    vibrate: [500, 100, 500, 100, 500], // High-priority aggressive vibration pattern
-    sound: "/notification.wav", // High-priority acoustic chime
-    silent: false, // Rings mobile device chime
+    vibrate: [200, 100, 200], // High-priority background vibration pattern
+    silent: false, // Rings mobile device default notification chime
     renotify: true,
     requireInteraction: true,
     tag: payload.data?.tag || eventId,
@@ -52,7 +51,6 @@ messaging.onBackgroundMessage((payload) => {
       url: targetUrl,
       eventId,
       type: notifType,
-      sound: "/notification.wav",
       timestamp: Date.now(),
     },
     dir: "rtl",
@@ -87,8 +85,7 @@ self.addEventListener("push", (event) => {
       body,
       icon: data.icon || "/icon.svg",
       badge: data.badge || "/icon.svg",
-      vibrate: [500, 100, 500, 100, 500],
-      sound: "/notification.wav",
+      vibrate: [200, 100, 200],
       silent: false,
       renotify: true,
       requireInteraction: true,
@@ -106,7 +103,6 @@ self.addEventListener("push", (event) => {
       data: {
         url: data.url || (notifType === "chat" ? "/?tab=chat" : "/"),
         eventId: data.eventId,
-        sound: data.sound || "/notification.wav",
         timestamp: data.timestamp || Date.now(),
       },
       dir: "rtl",
@@ -121,8 +117,7 @@ self.addEventListener("push", (event) => {
       self.registration.showNotification("منظومة الأستاذة إيمان الدمشيتي", {
         body: text,
         icon: "/icon.svg",
-        vibrate: [500, 100, 500, 100, 500],
-        sound: "/notification.wav",
+        vibrate: [200, 100, 200],
         silent: false,
         renotify: true,
         dir: "rtl",
@@ -148,13 +143,12 @@ self.addEventListener("notificationclick", (event) => {
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
       .then((clientList) => {
-        // 1. If an open client window is available, focus it and postMessage to play audio chime
+        // 1. If an open client window is available, focus it and postMessage
         for (const client of clientList) {
           if ("focus" in client) {
             client.focus();
             client.postMessage({
               type: "USER_INTERACTED_PLAY_ALERT",
-              sound: clickData.sound || "/notification.wav",
               url: targetUrl,
             });
             if ("navigate" in client && targetUrl) {

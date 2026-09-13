@@ -156,11 +156,10 @@ export class NotificationService {
           tag: payloadData.tag || `eman-${Date.now()}`,
           requireInteraction: true,
           renotify: true,
-          vibrate: [500, 100, 500, 100, 500],
+          vibrate: [200, 100, 200],
           dir: "rtl",
           data: {
             url: payloadData.url || "/",
-            sound: payloadData.sound || "/notification.wav",
             timestamp: Date.now(),
           },
         },
@@ -172,7 +171,7 @@ export class NotificationService {
    * Dispatches High-Priority Native Notifications to target users
    */
   public async sendHighPriorityPush(payload: PushNotificationPayload): Promise<PushDispatchResult> {
-    const { targetUserIds, title, body, type = "alert", sound = "/notification.wav", url = "/" } = payload;
+    const { targetUserIds, title, body, type = "alert", url = "/" } = payload;
     const result: PushDispatchResult = {
       totalTargeted: targetUserIds.length,
       fcmSent: 0,
@@ -210,7 +209,8 @@ export class NotificationService {
             badge: "/icon.svg",
             tag: payload.tag || `${type}-${Date.now()}`,
             url,
-            sound,
+            vibrate: [200, 100, 200],
+            silent: false,
             type,
             timestamp: Date.now(),
           });
@@ -226,7 +226,6 @@ export class NotificationService {
           const fcmMessage = this.buildFcmV1Payload(token, title, body, {
             type,
             url,
-            sound,
             tag: payload.tag,
             timestamp: Date.now(),
           });

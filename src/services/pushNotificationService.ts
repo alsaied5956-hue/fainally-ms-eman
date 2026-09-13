@@ -259,7 +259,7 @@ export async function triggerDeviceBackgroundAlert(payload: {
         body: payload.body,
         icon: "/icon.svg",
         badge: "/icon.svg",
-        vibrate: [300, 100, 300, 100, 400],
+        vibrate: [200, 100, 200],
         silent: false,
         renotify: true,
         requireInteraction: true,

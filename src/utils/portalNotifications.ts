@@ -53,13 +53,16 @@ if (typeof window !== "undefined") {
     navigator.serviceWorker.addEventListener("message", (event) => {
       if (event.data?.type === "USER_INTERACTED_PLAY_ALERT") {
         unlockAudio();
-        const soundUrl = event.data.sound || "/notification.wav";
-        try {
-          const audio = new Audio(soundUrl);
-          audio.play().catch(() => {
+        if (event.data.sound) {
+          try {
+            const audio = new Audio(event.data.sound);
+            audio.play().catch(() => {
+              playPortalAudioChime("alert");
+            });
+          } catch {
             playPortalAudioChime("alert");
-          });
-        } catch {
+          }
+        } else {
           playPortalAudioChime("alert");
         }
       }
@@ -216,13 +219,13 @@ export async function sendPortalNotification(
   // 2. Trigger mobile phone physical vibration if hardware supports it
   if (typeof navigator !== "undefined" && "vibrate" in navigator) {
     try {
-      navigator.vibrate([250, 100, 250, 100, 350]);
+      navigator.vibrate([200, 100, 200]);
     } catch {}
   }
 
   // 3. Display system-level push notification if permitted
   if (isNotificationSupported() && Notification.permission === "granted") {
-    const vibratePattern = [300, 100, 300, 100, 400];
+    const vibratePattern = [200, 100, 200];
     const targetUrl = options?.url || "/";
     const notifTag = options?.eventId || `eman-${type}-${Date.now()}`;
 

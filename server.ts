@@ -416,7 +416,6 @@ app.post("/api/portal/live-scan", async (req, res) => {
       title: statusTitle,
       body: `تم تسجيل ${status} للطالب (${finalName}) في مركز الرياضيات (${finalTime}).`,
       type: "attendance",
-      sound: "/notification.wav",
       icon: "/icon.svg",
       badge: "/icon.svg",
       tag: `att-${barcode}-${Date.now()}`,
@@ -1254,7 +1253,8 @@ async function sendWebPushToTargets(params: SendPushParams): Promise<{
     tag: tag || `eman-${type || "alert"}-${Date.now()}`,
     eventId: eventId || `ev-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     type: type || "alert",
-    sound: sound || "/notification.wav",
+    vibrate: [200, 100, 200],
+    silent: false,
     android_channel_id: "high_importance_loud_channel",
     priority: "high",
     urgency: "high",
@@ -1712,7 +1712,6 @@ app.post("/api/portal/admin/accounts/:barcode/suspend", authenticateSupervisor, 
       title: "تنبيه إداري عاجل",
       body: reason,
       type: "revocation",
-      sound: "/notification.wav",
     }).catch(() => {});
 
     // 5. Record in Outbox
@@ -1954,7 +1953,6 @@ app.post("/api/portal/chat/message", (req, res) => {
       title: senderRole === "supervisor" ? "رسالة جديدة من إدارة المنظومة" : `رسالة جديدة من ولي أمر (${conversationId})`,
       body: newMsg.text,
       type: "chat",
-      sound: "/notification.wav",
       url: "/?tab=chat",
       tag: `chat-${newMsg.conversationId}`,
     }).catch(() => {});
@@ -2235,7 +2233,6 @@ function setupAutonomousBackgroundPushListeners() {
         const targets: string[] = [barcode];
         if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
         if (student?.phone) targets.push(String(student.phone).trim());
-        targets.push("admin");
 
         console.log(`[Background Push] Live scan event detected: ${studentName} (${status}). Sending push to:`, targets);
         await sendWebPushToTargets({
@@ -2245,7 +2242,6 @@ function setupAutonomousBackgroundPushListeners() {
           icon: "/icon.svg",
           badge: "/icon.svg",
           type: eventType,
-          sound: "/notification.wav",
           url: `/?tab=attendance&barcode=${barcode}`,
           eventId: last.id || `live-${last.timestamp}`,
         });
@@ -2324,7 +2320,6 @@ function setupAutonomousBackgroundPushListeners() {
                 const targets: string[] = [item.barcode];
                 if (student?.parentPhone) targets.push(String(student.parentPhone).trim());
                 if (student?.phone) targets.push(String(student.phone).trim());
-                targets.push("admin");
 
                 console.log(`[Background Push] New payment detected: ${studentName} (${item.monthKey}). Sending push.`);
                 await sendWebPushToTargets({
@@ -2334,7 +2329,6 @@ function setupAutonomousBackgroundPushListeners() {
                   icon: "/icon.svg",
                   badge: "/icon.svg",
                   type: "payment",
-                  sound: "/notification.wav",
                   url: `/?tab=expenses&barcode=${item.barcode}`,
                   eventId: `pay-${item.monthKey}-${item.barcode}-${Date.now()}`,
                 });
