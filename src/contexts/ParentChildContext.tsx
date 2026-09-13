@@ -178,6 +178,21 @@ export const ParentChildProvider: React.FC<ParentChildProviderProps> = ({
             };
           });
         }
+
+        // 3. If student exam grade recorded/updated
+        if (ev.action === "exam_change") {
+          setChildrenMap((prev) => {
+            const existing = prev[bCode] || initialStudent;
+            return {
+              ...prev,
+              [bCode]: {
+                ...existing,
+                lastExamTitle: ev.examTitle || existing.lastExamTitle,
+                lastExamScore: ev.examScore || existing.lastExamScore,
+              },
+            };
+          });
+        }
       });
     });
 

@@ -286,6 +286,7 @@ export function executeInstantRemoteLogout(reason?: string): void {
     bus.close();
   } catch {}
 
+  // Dispatches to local state listeners
   window.dispatchEvent(
     new CustomEvent("eman_account_revoked", {
       detail: {
@@ -295,12 +296,11 @@ export function executeInstantRemoteLogout(reason?: string): void {
     })
   );
 
-  // If user is currently viewing the app, inform them with alert and hard reload to root
+  // Safely redirect to root login screen with notification
   try {
-    alert(`⚠️ تنبيه أمني:\n${finalReason}`);
-  } catch {}
-
-  try {
+    if (window.location.search.includes("notice=")) {
+      return;
+    }
     window.location.href = "/?notice=" + encodeURIComponent(finalReason);
   } catch {}
 }

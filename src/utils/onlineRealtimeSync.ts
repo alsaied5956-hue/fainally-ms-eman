@@ -638,6 +638,11 @@ function handleRealtimeEvent(event: any): void {
     const liveEv = event.event;
     if (typeof window !== "undefined") {
       window.dispatchEvent(
+        new CustomEvent("eman_student_live_event", {
+          detail: liveEv,
+        })
+      );
+      window.dispatchEvent(
         new CustomEvent("student-live-event", {
           detail: liveEv,
         })

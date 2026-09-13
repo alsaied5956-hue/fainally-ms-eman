@@ -35,7 +35,21 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
   });
 
   // Notice when session is revoked remotely by admin (disable or delete)
-  const [revocationNotice, setRevocationNotice] = useState<string | null>(null);
+  const [revocationNotice, setRevocationNotice] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const notice = params.get("notice");
+        if (notice) {
+          // Clean URL without reloading
+          const cleanUrl = window.location.pathname;
+          window.history.replaceState({}, document.title, cleanUrl);
+          return notice;
+        }
+      } catch {}
+    }
+    return null;
+  });
 
   // Sync latest cloud accounts registry on mount
   useEffect(() => {
@@ -50,6 +64,21 @@ export const PortalMasterApp: React.FC<PortalMasterAppProps> = ({
       setRevocationNotice(null);
     }
   }, []);
+
+  // Window-level remote revocation event listener (from studentLiveSync or BroadcastChannel)
+  useEffect(() => {
+    const handleRevoked = (ev: Event) => {
+      const customEv = ev as CustomEvent;
+      const reason = customEv.detail?.reason || "تم فصل الجلسة وإلغاء تنشيط الحساب من قِبل إدارة المنظومة.";
+      setRevocationNotice(reason);
+      handleLogout(true);
+    };
+
+    window.addEventListener("eman_account_revoked", handleRevoked);
+    return () => {
+      window.removeEventListener("eman_account_revoked", handleRevoked);
+    };
+  }, [handleLogout]);
 
   // Live remote logout watcher:
   // If admin explicitly disables or revokes account, force remote logout
